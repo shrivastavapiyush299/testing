@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>BuildTrack — Field Ledger</title>
+
+<!-- PWA meta -->
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="BuildTrack" />
+<meta name="theme-color" content="#F9F8F5" />
+
+<!-- Inline PWA manifest as data URI so the file is fully self-contained -->
+<link rel="manifest" href='data:application/manifest+json;charset=utf-8,{"name":"BuildTrack%20Field%20Ledger","short_name":"BuildTrack","start_url":".","display":"standalone","background_color":"%23F9F8F5","theme_color":"%23F9F8F5","icons":[{"src":"data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20192%20192%22%3E%3Crect%20width%3D%22192%22%20height%3D%22192%22%20fill%3D%22%23B45309%22%2F%3E%3Ctext%20x%3D%2296%22%20y%3D%22115%22%20font-family%3D%22sans-serif%22%20font-size%3D%2272%22%20font-weight%3D%22700%22%20fill%3D%22white%22%20text-anchor%3D%22middle%22%3EBT%3C%2Ftext%3E%3C%2Fsvg%3E","sizes":"192x192","type":"image/svg+xml"}]}' />
+
+<!-- CDN deps -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" crossorigin></script>
+
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #F9F8F5;
+    color: #1A1916;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    overscroll-behavior: none;
+  }
+  body {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  button { font-family: inherit; cursor: pointer; }
+  input, select, textarea {
+    font-family: inherit;
+    font-size: 16px; /* prevent iOS auto-zoom */
+  }
+  /* Hide spinners on number inputs in some browsers */
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  input[type=number] { -moz-appearance: textfield; }
+  table { border-collapse: collapse; }
+  ::placeholder { color: #9C9890; }
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  @keyframes toastIn {
+    from { transform: translateY(10px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+
+  /* Form grids — desktop default lives in inline styles; these override on phone widths */
+  @media (max-width: 720px) {
+    .bt-grid {
+      display: flex !important;
+      flex-direction: column !important;
+      align-items: stretch !important;
+    }
+    .bt-grid > * {
+      width: 100% !important;
+      max-width: 100% !important;
+      min-width: 0 !important;
+    }
+    .bt-toolbar > button {
+      padding: 10px 10px !important;
+      font-size: 13px !important;
+    }
+  }
+
+  @media (max-width: 480px) {
+    /* On very narrow phones, abbreviate toolbar button labels via CSS data attributes */
+    .bt-toolbar .bt-label-long { display: none; }
+    .bt-toolbar .bt-label-short { display: inline; }
+    h1.bt-project-title { font-size: 18px !important; }
+  }
+  @media (min-width: 481px) {
+    .bt-toolbar .bt-label-long  { display: inline; }
+    .bt-toolbar .bt-label-short { display: none; }
+  }
+
+  /* Stat cards: ensure they stack 2-up cleanly on phones */
+  @media (max-width: 480px) {
+    .bt-stat-row > div { flex: 1 1 calc(50% - 5px) !important; min-width: 0 !important; }
+    .bt-stat-row > div:nth-child(3) { flex: 1 1 100% !important; }
+  }
+
+  /* Tighten table cell padding on phones */
+  @media (max-width: 480px) {
+    .bt-table th, .bt-table td { padding: 8px 8px !important; font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useRef, useEffect } = React;
+
+/* ============================================================
+   Design tokens
+   ============================================================ */
+const C = {
+  bg: "#F9F8F5", surface: "#FFFFFF",
+  rule: "#E8E5DF", ruleDark: "#D0CCC4",
+  ink: "#1A1916", inkMid: "#4A4742", inkFaint: "#9C9890",
+  amber: "#B45309", amberBg: "#FFFBEB", amberBorder: "#FDE68A",
+  red: "#B91C1C", redBg: "#FEF2F2", redLight: "#FEE2E2",
+  green: "#15803D", greenBg: "#F0FDF4", greenLight: "#BBF7D0",
+  orange: "#C2410C", orangeBg: "#FFF7ED",
+  blue: "#1D4ED8", blueBg: "#EFF6FF",
+};
+
+const AVATAR_COLORS = ["#B45309", "#1D4ED8", "#15803D", "#7C2D12", "#6B21A8", "#0E7490"];
+
+/* ============================================================
+   Helpers
+   ============================================================ */
+const uid     = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+const today   = () => new Date().toISOString().slice(0, 10);
+const fmtINR  = n => "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN");
+const fmtDate = d => {
+  if (!d) return "—";
+  const dt = new Date(d + "T00:00:00");
+  if (isNaN(dt)) return d;
+  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" });
+};
+const initials = s => (s || "").trim().split(" ").slice(0, 2).map(w => w[0] || "").join("").toUpperCase() || "?";
+const isOverdue = d => d && new Date(d + "T00:00:00") < new Date(today() + "T00:00:00");
+const avatarColor = name => AVATAR_COLORS[(name || "?").charCodeAt(0) % AVATAR_COLORS.length];
+
+/* ============================================================
+   Seed data
+   ============================================================ */
+const SEED = {
+  projects: [
+    { id: "p1", name: "Lokesh Nagar",      location: "Bhopal, MP", status: "Active",  startDate: "2026-02-01", budget: 1500000, notes: "Main site, Block A" },
+    { id: "p2", name: "Bhaginath Ground",  location: "Bhopal, MP", status: "Active",  startDate: "2026-03-10", budget: 600000,  notes: "" },
+  ],
+  names: [
+    // p1
+    { id: "n_p1_sariya",  pid: "p1", label: "Sariya"  },
+    { id: "n_p1_bajru",   pid: "p1", label: "Bajru"   },
+    { id: "n_p1_cement",  pid: "p1", label: "Cement"  },
+    { id: "n_p1_muram",   pid: "p1", label: "Muram"   },
+    { id: "n_p1_labour",  pid: "p1", label: "Labour"  },
+    { id: "n_p1_tractor", pid: "p1", label: "Tractor" },
+    { id: "n_p1_deepu",   pid: "p1", label: "Deepu"   },
+    { id: "n_p1_klepu",   pid: "p1", label: "Klepu"   },
+    { id: "n_p1_bajirath",pid: "p1", label: "Bajirath"},
+    { id: "n_p1_sumna",   pid: "p1", label: "Sumna"   },
+    { id: "n_p1_pradeep", pid: "p1", label: "Pradeep Chaurasiya" },
+    { id: "n_p1_gabbu",   pid: "p1", label: "Gabbu"   },
+    { id: "n_p1_phone",   pid: "p1", label: "Phone & Chep" },
+    // p2
+    { id: "n_p2_labour",  pid: "p2", label: "Labour"  },
+    { id: "n_p2_cement",  pid: "p2", label: "Cement"  },
+    { id: "n_p2_client",  pid: "p2", label: "Client"  },
+  ],
+  entries: [
+    // Lokesh Nagar — from handwritten notebook
+    { id: "e_001", pid: "p1", nameId: "n_p1_phone",    date: "2026-03-01", desc: "Namolinine – paid",         amt: 20000,  type: "debit" },
+    { id: "e_002", pid: "p1", nameId: "n_p1_sariya",   date: "2026-03-02", desc: "Kaundhem – Lunkashlkyu",    amt: 191710, type: "debit" },
+    { id: "e_003", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-02", desc: "200ft Tractor (Deepan)",    amt: 6000,   type: "debit" },
+    { id: "e_004", pid: "p1", nameId: "n_p1_tractor",  date: "2026-03-02", desc: "40mm Tactor",               amt: 2000,   type: "debit" },
+    { id: "e_005", pid: "p1", nameId: "n_p1_bajirath", date: "2026-03-03", desc: "A/c – 40000 Phone",         amt: 18450,  type: "debit" },
+    { id: "e_006", pid: "p1", nameId: "n_p1_deepu",    date: "2026-03-10", desc: "20mm Giti – Rind",          amt: 4200,   type: "debit" },
+    { id: "e_007", pid: "p1", nameId: "n_p1_klepu",    date: "2026-03-10", desc: "20mm 2 Chau – paid",        amt: 10000,  type: "debit" },
+    { id: "e_008", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-11", desc: "Payment",                   amt: 7000,   type: "debit" },
+    { id: "e_009", pid: "p1", nameId: "n_p1_labour",   date: "2026-03-11", desc: "Security guard",            amt: 4500,   type: "debit" },
+    { id: "e_010", pid: "p1", nameId: "n_p1_sariya",   date: "2026-03-18", desc: "Payment",                   amt: 110580, type: "debit" },
+    { id: "e_011", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-18", desc: "Payment",                   amt: 6000,   type: "debit" },
+    { id: "e_012", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-21", desc: "→ Deepu (Bhaginath Gnd)",   amt: 10000,  type: "debit" },
+    { id: "e_013", pid: "p1", nameId: "n_p1_cement",   date: "2026-03-22", desc: "70 Bag – payment",          amt: 22250,  type: "debit" },
+    { id: "e_014", pid: "p1", nameId: "n_p1_sumna",    date: "2026-03-28", desc: "Site 4 – 2000",             amt: 10000,  type: "debit" },
+    { id: "e_015", pid: "p1", nameId: "n_p1_sumna",    date: "2026-03-28", desc: "Site – 4000",               amt: 20000,  type: "debit" },
+    { id: "e_016", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-31", desc: "Payment",                   amt: 6000,   type: "debit" },
+    { id: "e_017", pid: "p1", nameId: "n_p1_pradeep",  date: "2026-04-01", desc: "80 Bag Cement",             amt: 24800,  type: "debit" },
+    { id: "e_018", pid: "p1", nameId: "n_p1_gabbu",    date: "2026-04-01", desc: "Muram no Diye",             amt: 60000,  type: "debit" },
+    { id: "e_019", pid: "p1", nameId: "n_p1_labour",   date: "2026-04-01", desc: "Muran Felai",               amt: 1500,   type: "debit" },
+    // Bhaginath Ground
+    { id: "e_020", pid: "p2", nameId: "n_p2_labour",   date: "2026-03-15", desc: "Foundation work",           amt: 12000,  type: "debit"  },
+    { id: "e_021", pid: "p2", nameId: "n_p2_cement",   date: "2026-03-20", desc: "50 Bag",                    amt: 15500,  type: "debit"  },
+    { id: "e_022", pid: "p2", nameId: "n_p2_client",   date: "2026-03-25", desc: "Advance received",          amt: 50000,  type: "credit" },
+  ],
+  pending: [
+    { id: "pn_001", pid: "p1", nameId: "n_p1_sariya", desc: "Remaining Sariya balance", amt: 45000, dueDate: "2026-04-15", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
+    { id: "pn_002", pid: "p1", nameId: "n_p1_bajru",  desc: "Bajru April dues",         amt: 12000, dueDate: "2026-04-10", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
+    { id: "pn_003", pid: "p1", nameId: "n_p1_cement", desc: "50 Bag cement pending",    amt: 15500, dueDate: "2026-05-20", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
+    { id: "pn_004", pid: "p1", nameId: "n_p1_labour", desc: "Labour balance April",     amt:  8500, dueDate: "2026-04-05", status: "cleared", createdAt: "2026-04-01", clearedOn: "2026-04-05", clearedAmt: 8500 },
+    { id: "pn_005", pid: "p2", nameId: "n_p2_labour", desc: "May labour dues",          amt:  9000, dueDate: "2026-05-10", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
+  ],
+};
+
+/* ============================================================
+   localStorage persistence
+   ============================================================ */
+const LS = {
+  projects: "buildtrack_projects",
+  names: "buildtrack_names",
+  entries: "buildtrack_entries",
+  pending: "buildtrack_pending",
+};
+const loadFromLS = () => {
+  try {
+    const p = JSON.parse(localStorage.getItem(LS.projects) || "null");
+    const n = JSON.parse(localStorage.getItem(LS.names)    || "null");
+    const e = JSON.parse(localStorage.getItem(LS.entries)  || "null");
+    const pn = JSON.parse(localStorage.getItem(LS.pending) || "null");
+    if (Array.isArray(p) && p.length) return { projects: p, names: n || [], entries: e || [], pending: pn || [] };
+  } catch (_) {}
+  return SEED;
+};
+const saveAll = (state) => {
+  try {
+    localStorage.setItem(LS.projects, JSON.stringify(state.projects));
+    localStorage.setItem(LS.names,    JSON.stringify(state.names));
+    localStorage.setItem(LS.entries,  JSON.stringify(state.entries));
+    localStorage.setItem(LS.pending,  JSON.stringify(state.pending));
+  } catch (_) {}
+};
+
+/* ============================================================
+   Shared UI building blocks
+   ============================================================ */
+const Avatar = ({ name, size = 32 }) => (
+  <div style={{
+    width: size, height: size, borderRadius: "50%",
+    background: avatarColor(name), color: "#fff",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    fontSize: size * 0.4, fontWeight: 600, flexShrink: 0, letterSpacing: 0.3,
+  }}>{initials(name)}</div>
+);
+
+const Btn = ({ kind = "primary", style = {}, children, ...p }) => {
+  const base = {
+    minHeight: 44, minWidth: 44, padding: "10px 14px",
+    borderRadius: 8, border: "1px solid transparent",
+    fontSize: 14, fontWeight: 500, cursor: "pointer",
+    display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+    transition: "background 0.12s, border-color 0.12s",
+  };
+  const styles = {
+    primary: { background: C.amber, color: "#fff", borderColor: C.amber },
+    ghost:   { background: "transparent", color: C.ink, borderColor: C.ruleDark },
+    danger:  { background: C.redBg, color: C.red, borderColor: C.redLight },
+    success: { background: C.greenBg, color: C.green, borderColor: C.greenLight },
+    plain:   { background: C.surface, color: C.ink, borderColor: C.rule },
+  };
+  return <button {...p} style={{ ...base, ...styles[kind], ...style }}>{children}</button>;
+};
+
+const Input = (p) => (
+  <input {...p} style={{
+    height: 44, padding: "0 12px", borderRadius: 8,
+    border: `1px solid ${C.ruleDark}`, background: C.surface, color: C.ink,
+    outline: "none", width: "100%", ...(p.style || {}),
+  }} />
+);
+const Select = (p) => (
+  <select {...p} style={{
+    height: 44, padding: "0 8px", borderRadius: 8,
+    border: `1px solid ${C.ruleDark}`, background: C.surface, color: C.ink,
+    outline: "none", width: "100%", ...(p.style || {}),
+  }} />
+);
+
+const StatCard = ({ label, value, color = C.ink, bg = C.surface }) => (
+  <div style={{
+    flex: 1, minWidth: 140, background: bg,
+    border: `1px solid ${C.rule}`, borderRadius: 10, padding: "12px 14px",
+  }}>
+    <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+    <div style={{ fontSize: 20, fontWeight: 600, color, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+  </div>
+);
+
+/* ============================================================
+   Toast
+   ============================================================ */
+function Toast({ msg, kind, onDone }) {
+  useEffect(() => {
+    if (!msg) return;
+    const t = setTimeout(onDone, 3000);
+    return () => clearTimeout(t);
+  }, [msg]);
+  if (!msg) return null;
+  const palette = {
+    success: { bg: C.greenBg, fg: C.green, border: C.greenLight },
+    error:   { bg: C.redBg,   fg: C.red,   border: C.redLight   },
+    info:    { bg: C.blueBg,  fg: C.blue,  border: "#BFDBFE"    },
+  }[kind] || { bg: C.surface, fg: C.ink, border: C.rule };
+  return (
+    <div style={{
+      position: "fixed", bottom: 20, right: 20, zIndex: 1000,
+      background: palette.bg, color: palette.fg,
+      border: `1px solid ${palette.border}`, borderRadius: 8,
+      padding: "10px 14px", boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+      animation: "toastIn 0.2s ease-out", fontSize: 13, fontWeight: 500,
+      maxWidth: "calc(100vw - 40px)",
+    }}>{msg}</div>
+  );
+}
+
+/* ============================================================
+   Modal
+   ============================================================ */
+function Modal({ title, onClose, children }) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      zIndex: 500, padding: 12,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: C.surface, borderRadius: 12,
+        width: "min(460px, 94vw)", maxHeight: "90vh",
+        overflow: "auto", boxShadow: "0 20px 50px rgba(0,0,0,0.2)",
+      }}>
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: "14px 18px", borderBottom: `1px solid ${C.rule}`,
+        }}>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>{title}</div>
+          <button onClick={onClose} style={{
+            background: "transparent", border: "none", color: C.inkMid,
+            fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 4,
+          }}>×</button>
+        </div>
+        <div style={{ padding: 18 }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   QuickNameAdder — inline component for adding a name without leaving the page
+   ============================================================ */
+function QuickNameAdder({ projectId, onAdded }) {
+  const [open, setOpen] = useState(false);
+  const [val, setVal] = useState("");
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        title="Register a new name"
+        style={{
+          height: 44, width: 44, borderRadius: 8,
+          border: `1px dashed ${C.ruleDark}`, background: "transparent",
+          color: C.inkMid, fontSize: 18, cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>+</button>
+    );
+  }
+  const save = () => {
+    const label = val.trim();
+    if (!label) { setOpen(false); return; }
+    const n = { id: uid(), pid: projectId, label };
+    onAdded(n);
+    setVal("");
+    setOpen(false);
+  };
+  return (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <Input
+        autoFocus
+        value={val}
+        onChange={e => setVal(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") setOpen(false); }}
+        placeholder="New name…"
+        style={{ width: 140, height: 44 }}
+      />
+      <Btn kind="primary" onClick={save} style={{ height: 44, padding: "0 12px" }}>Add</Btn>
+      <Btn kind="ghost"   onClick={() => setOpen(false)} style={{ height: 44, padding: "0 10px" }}>✕</Btn>
+    </div>
+  );
+}
+
+/* ============================================================
+   Project chips + tab bar
+   ============================================================ */
+function ProjectChips({ projects, activePid, onSelect, onNew }) {
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {projects.map(p => (
+        <button key={p.id} onClick={() => onSelect(p.id)} style={{
+          padding: "8px 14px", borderRadius: 999,
+          border: `1px solid ${p.id === activePid ? C.amber : C.ruleDark}`,
+          background: p.id === activePid ? C.amber : C.surface,
+          color: p.id === activePid ? "#fff" : C.ink,
+          fontSize: 13, fontWeight: 500, cursor: "pointer", minHeight: 36,
+        }}>{p.name}</button>
+      ))}
+      <button onClick={onNew} style={{
+        padding: "8px 14px", borderRadius: 999,
+        border: `1px dashed ${C.ruleDark}`, background: "transparent",
+        color: C.inkMid, fontSize: 13, fontWeight: 500, cursor: "pointer", minHeight: 36,
+      }}>+ New project</button>
+    </div>
+  );
+}
+
+function TabBar({ tab, setTab, pendingCount }) {
+  const tabs = [
+    { k: "ledger",  l: "Ledger" },
+    { k: "pending", l: `Pending${pendingCount ? ` (${pendingCount})` : ""}` },
+    { k: "summary", l: "Summary" },
+    { k: "names",   l: "Names"  },
+  ];
+  return (
+    <div style={{ display: "flex", borderBottom: `1px solid ${C.rule}`, overflowX: "auto" }}>
+      {tabs.map(t => (
+        <button key={t.k} onClick={() => setTab(t.k)} style={{
+          padding: "12px 16px", border: "none",
+          background: "transparent", color: tab === t.k ? C.amber : C.inkMid,
+          borderBottom: `2px solid ${tab === t.k ? C.amber : "transparent"}`,
+          fontSize: 14, fontWeight: tab === t.k ? 600 : 500,
+          cursor: "pointer", whiteSpace: "nowrap", minHeight: 44,
+        }}>{t.l}</button>
+      ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   LedgerView
+   ============================================================ */
+function LedgerView({ pid, names, entries, addEntry, addName }) {
+  const [date, setDate] = useState(today());
+  const [nameId, setNameId] = useState("");
+  const [desc, setDesc] = useState("");
+  const [amt, setAmt] = useState("");
+  const [type, setType] = useState("debit");
+  const [openRow, setOpenRow] = useState(null); // entry id being added against
+
+  const projectNames = names.filter(n => n.pid === pid);
+  const projectEntries = entries.filter(e => e.pid === pid);
+
+  // Auto-select first name when project changes / names list changes
+  useEffect(() => {
+    if (!nameId && projectNames.length) setNameId(projectNames[0].id);
+    if (nameId && !projectNames.find(n => n.id === nameId)) setNameId(projectNames[0]?.id || "");
+  }, [pid, names.length]);
+
+  const totalDebit  = projectEntries.filter(e => e.type === "debit").reduce((s, e) => s + Number(e.amt || 0), 0);
+  const totalCredit = projectEntries.filter(e => e.type === "credit").reduce((s, e) => s + Number(e.amt || 0), 0);
+  const net = totalDebit - totalCredit;
+
+  const submit = () => {
+    if (!nameId) return;
+    const a = Number(amt);
+    if (!a || a <= 0) return;
+    addEntry({ id: uid(), pid, nameId, date, desc: desc.trim(), amt: a, type });
+    setDesc("");
+    setAmt("");
+  };
+
+  // Sort ascending by date for display
+  const sorted = [...projectEntries].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const nameLabel = id => projectNames.find(n => n.id === id)?.label || "—";
+
+  return (
+    <div>
+      {/* Add form */}
+      <div className="bt-grid" style={{
+        background: "#FAF8F2", border: `1px solid ${C.rule}`, borderRadius: 10,
+        padding: 12, marginBottom: 16,
+        display: "grid", gridTemplateColumns: "auto auto 1fr auto auto auto", gap: 8, alignItems: "center",
+      }}>
+        <Input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: 150 }} />
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <Select value={nameId} onChange={e => setNameId(e.target.value)} style={{ minWidth: 160 }}>
+            {projectNames.length === 0
+              ? <option value="">No names — add one →</option>
+              : projectNames.map(n => <option key={n.id} value={n.id}>{n.label}</option>)}
+          </Select>
+          <QuickNameAdder projectId={pid} onAdded={(n) => { addName(n); setNameId(n.id); }} />
+        </div>
+        <Input
+          value={desc} onChange={e => setDesc(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") submit(); }}
+          placeholder="Details / description" />
+        <Input
+          type="number" value={amt}
+          onChange={e => setAmt(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") submit(); }}
+          placeholder="Amount" style={{ width: 120 }} />
+        <Select value={type} onChange={e => setType(e.target.value)} style={{ width: 130 }}>
+          <option value="debit">Paid out</option>
+          <option value="credit">Received</option>
+        </Select>
+        <Btn kind="primary" onClick={submit}>+ Add</Btn>
+      </div>
+
+      {/* Stat cards */}
+      <div className="bt-stat-row" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+        <StatCard label="Total paid out" value={fmtINR(totalDebit)}  color={C.red}   bg={C.redBg} />
+        <StatCard label="Total received" value={fmtINR(totalCredit)} color={C.green} bg={C.greenBg} />
+        <StatCard label="Net outflow"    value={fmtINR(net)}         color={net >= 0 ? C.red : C.green} />
+      </div>
+
+      {/* Table */}
+      {sorted.length === 0 ? (
+        <div style={{
+          background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10,
+          padding: 32, textAlign: "center", color: C.inkFaint,
+        }}>No entries yet. Use the form above to add your first one.</div>
+      ) : (
+        <div className="scroll-x" style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10 }}>
+          <table className="bt-table" style={{ width: "100%", minWidth: 720, fontSize: 14 }}>
+            <thead>
+              <tr style={{ background: "#FAF8F2", borderBottom: `1px solid ${C.rule}` }}>
+                <th style={th()}>Date</th>
+                <th style={th()}>Name</th>
+                <th style={th()}>Details</th>
+                <th style={{ ...th(), textAlign: "right" }}>Amount</th>
+                <th style={{ ...th(), width: 50 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((e, i) => {
+                const prevName = i > 0 ? sorted[i - 1].nameId : null;
+                const gap = prevName && prevName !== e.nameId;
+                const isOpen = openRow === e.id;
+                const rowBg = isOpen ? C.amberBg : (i % 2 ? C.bg : C.surface);
+                const rowBorderLeft = isOpen ? `3px solid ${C.amber}` : "3px solid transparent";
+                return (
+                  <React.Fragment key={e.id}>
+                    {gap && <tr><td colSpan={5} style={{ height: 4, background: C.bg, borderBottom: `1px solid ${C.rule}` }}/></tr>}
+                    <tr style={{ background: rowBg, borderBottom: `1px solid ${C.rule}` }}>
+                      <td style={{ ...td(), fontFamily: "ui-monospace, SF Mono, monospace", fontSize: 11, color: C.inkMid, borderLeft: rowBorderLeft }}>{fmtDate(e.date)}</td>
+                      <td style={{ ...td(), fontWeight: 600 }}>{nameLabel(e.nameId)}</td>
+                      <td style={{ ...td(), color: C.inkMid }}>{e.desc || <span style={{ color: C.inkFaint }}>—</span>}</td>
+                      <td style={{
+                        ...td(), textAlign: "right",
+                        color: e.type === "debit" ? C.red : C.green,
+                        fontWeight: 600, fontVariantNumeric: "tabular-nums",
+                      }}>
+                        {e.type === "debit" ? "−" : "+"}{fmtINR(e.amt)}
+                      </td>
+                      <td style={{ ...td(), textAlign: "right" }}>
+                        <button
+                          onClick={() => setOpenRow(isOpen ? null : e.id)}
+                          title={isOpen ? "Close" : `Add another entry for ${nameLabel(e.nameId)}`}
+                          style={{
+                            width: 26, height: 26, borderRadius: 6,
+                            border: isOpen ? `1px solid ${C.amber}` : `1px dashed ${C.ruleDark}`,
+                            background: isOpen ? C.amber : "transparent",
+                            color: isOpen ? "#fff" : C.inkFaint,
+                            fontSize: 14, cursor: "pointer",
+                            display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          }}>
+                          {isOpen ? "×" : "+"}
+                        </button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <InlineRowAdd
+                        pid={pid}
+                        forNameId={e.nameId}
+                        forNameLabel={nameLabel(e.nameId)}
+                        onSave={(rec) => { addEntry(rec); setOpenRow(null); }}
+                        onCancel={() => setOpenRow(null)}
+                      />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr style={{ background: "#FAF8F2", borderTop: `2px solid ${C.ruleDark}` }}>
+                <td colSpan={3} style={{ ...td(), color: C.inkMid, fontSize: 12 }}>{sorted.length} {sorted.length === 1 ? "entry" : "entries"}</td>
+                <td style={{ ...td(), textAlign: "right", color: C.red, fontWeight: 600 }}>{fmtINR(totalDebit)} paid</td>
+                <td/>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InlineRowAdd({ pid, forNameId, forNameLabel, onSave, onCancel }) {
+  const [date, setDate] = useState(today());
+  const [desc, setDesc] = useState("");
+  const [amt, setAmt] = useState("");
+  const [type, setType] = useState("debit");
+
+  const save = () => {
+    const a = Number(amt);
+    if (!a || a <= 0) return;
+    onSave({ id: uid(), pid, nameId: forNameId, date, desc: desc.trim(), amt: a, type });
+  };
+
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
+  }, []);
+
+  return (
+    <tr>
+      <td colSpan={5} style={{ background: C.amberBg, padding: 12, borderBottom: `1px solid ${C.amberBorder}` }}>
+        <div style={{ fontSize: 12, color: C.amber, fontWeight: 600, marginBottom: 8 }}>
+          Adding for <b>{forNameLabel}</b>
+        </div>
+        <div className="bt-grid" style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto auto auto", gap: 8 }}>
+          <Input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: 150 }} />
+          <Input
+            autoFocus
+            value={desc} onChange={e => setDesc(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") save(); }}
+            placeholder="Details" />
+          <Input
+            type="number" value={amt}
+            onChange={e => setAmt(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") save(); }}
+            placeholder="Amount" style={{ width: 120 }} />
+          <Select value={type} onChange={e => setType(e.target.value)} style={{ width: 130 }}>
+            <option value="debit">Paid out</option>
+            <option value="credit">Received</option>
+          </Select>
+          <Btn kind="primary" onClick={save}>Save</Btn>
+          <Btn kind="ghost"   onClick={onCancel}>✕</Btn>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+const th = () => ({ padding: "10px 12px", textAlign: "left", fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, fontWeight: 500 });
+const td = () => ({ padding: "10px 12px" });
+
+/* ============================================================
+   PendingView
+   ============================================================ */
+function PendingView({ pid, names, pending, addPending, clearPending, addName }) {
+  const [nameId, setNameId] = useState("");
+  const [desc, setDesc] = useState("");
+  const [amt, setAmt] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [openClear, setOpenClear] = useState(null);
+
+  const projectNames = names.filter(n => n.pid === pid);
+  const projPending = pending.filter(p => p.pid === pid);
+  const open = projPending.filter(p => p.status === "pending");
+  const cleared = projPending.filter(p => p.status === "cleared");
+  const totalPending = open.reduce((s, p) => s + Number(p.amt || 0), 0);
+
+  useEffect(() => {
+    if (!nameId && projectNames.length) setNameId(projectNames[0].id);
+    if (nameId && !projectNames.find(n => n.id === nameId)) setNameId(projectNames[0]?.id || "");
+  }, [pid, names.length]);
+
+  const submit = () => {
+    if (!nameId) return;
+    const a = Number(amt);
+    if (!a || a <= 0) return;
+    addPending({
+      id: uid(), pid, nameId, desc: desc.trim(), amt: a,
+      dueDate: dueDate || "", status: "pending",
+      createdAt: today(), clearedOn: "", clearedAmt: 0,
+    });
+    setDesc(""); setAmt(""); setDueDate("");
+  };
+
+  const nameLabel = id => projectNames.find(n => n.id === id)?.label || "—";
+
+  return (
+    <div>
+      <div className="bt-grid" style={{
+        background: "#FAF8F2", border: `1px solid ${C.rule}`, borderRadius: 10, padding: 12, marginBottom: 16,
+        display: "grid", gridTemplateColumns: "auto 1fr auto auto auto", gap: 8, alignItems: "center",
+      }}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <Select value={nameId} onChange={e => setNameId(e.target.value)} style={{ minWidth: 160 }}>
+            {projectNames.length === 0
+              ? <option value="">No names — add one →</option>
+              : projectNames.map(n => <option key={n.id} value={n.id}>{n.label}</option>)}
+          </Select>
+          <QuickNameAdder projectId={pid} onAdded={(n) => { addName(n); setNameId(n.id); }} />
+        </div>
+        <Input value={desc} onChange={e => setDesc(e.target.value)} placeholder="What is pending?" onKeyDown={e => e.key === "Enter" && submit()} />
+        <Input type="number" value={amt} onChange={e => setAmt(e.target.value)} placeholder="Amount" style={{ width: 120 }} onKeyDown={e => e.key === "Enter" && submit()} />
+        <Input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} style={{ width: 160 }} />
+        <Btn kind="primary" onClick={submit}>+ Add</Btn>
+      </div>
+
+      <div className="bt-stat-row" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+        <StatCard label="Total pending" value={fmtINR(totalPending)} color={C.orange} bg={C.orangeBg} />
+        <StatCard label="Open items"    value={String(open.length)}   color={C.orange} />
+        <StatCard label="Cleared"       value={String(cleared.length)} color={C.green}  bg={C.greenBg} />
+      </div>
+
+      <div style={{ fontSize: 12, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+        Open Pending ({open.length})
+      </div>
+      {open.length === 0 ? (
+        <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10, padding: 24, textAlign: "center", color: C.inkFaint, marginBottom: 16 }}>
+          Nothing pending. 👍
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+          {open.map(p => {
+            const overdue = isOverdue(p.dueDate);
+            const isOpen = openClear === p.id;
+            const label = nameLabel(p.nameId);
+            return (
+              <div key={p.id} style={{
+                background: C.surface, border: `1px solid ${overdue ? C.redLight : C.rule}`, borderRadius: 10,
+                overflow: "hidden",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 12 }}>
+                  <Avatar name={label} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ fontWeight: 600 }}>{label}</div>
+                      {overdue && (
+                        <span style={{
+                          background: C.redLight, color: C.red, fontSize: 10, fontWeight: 700,
+                          padding: "2px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: 1,
+                        }}>Overdue</span>
+                      )}
+                    </div>
+                    <div style={{ color: C.inkMid, fontSize: 13, marginTop: 2 }}>{p.desc || <span style={{ color: C.inkFaint }}>—</span>}</div>
+                    {p.dueDate && (
+                      <div style={{ color: overdue ? C.red : C.inkFaint, fontSize: 11, marginTop: 4 }}>
+                        Due: {fmtDate(p.dueDate)}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ color: C.orange, fontSize: 18, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtINR(p.amt)}</div>
+                    <Btn kind="success" onClick={() => setOpenClear(isOpen ? null : p.id)} style={{ height: 32, padding: "0 10px", fontSize: 12, marginTop: 4 }}>
+                      {isOpen ? "Cancel" : "✓ Clear"}
+                    </Btn>
+                  </div>
+                </div>
+                {isOpen && (
+                  <InlineClearForm
+                    pending={p}
+                    onSave={(clearedAmt, clearedOn) => {
+                      clearPending(p.id, clearedAmt, clearedOn);
+                      setOpenClear(null);
+                    }}
+                    onCancel={() => setOpenClear(null)}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {cleared.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+            Cleared ({cleared.length})
+          </div>
+          <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10 }}>
+            {cleared.map((p, i) => (
+              <div key={p.id} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+                borderBottom: i < cleared.length - 1 ? `1px solid ${C.rule}` : "none",
+                opacity: 0.85,
+              }}>
+                <Avatar name={nameLabel(p.nameId)} size={26} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{nameLabel(p.nameId)} <span style={{ color: C.inkFaint, fontWeight: 400 }}> · {p.desc || "—"}</span></div>
+                  <div style={{ fontSize: 11, color: C.inkFaint }}>Cleared {fmtDate(p.clearedOn)}</div>
+                </div>
+                <div style={{ color: C.inkMid, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>{fmtINR(p.clearedAmt || p.amt)}</div>
+                <span style={{
+                  background: C.greenLight, color: C.green, fontSize: 10, fontWeight: 700,
+                  padding: "2px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: 1,
+                }}>Cleared</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function InlineClearForm({ pending, onSave, onCancel }) {
+  const [amt, setAmt] = useState(String(pending.amt));
+  const [d, setD] = useState(today());
+  const save = () => {
+    const a = Number(amt);
+    if (!a || a <= 0) return;
+    onSave(a, d);
+  };
+  return (
+    <div style={{ background: C.greenBg, borderTop: `1px solid ${C.greenLight}`, padding: 12 }}>
+      <div style={{ fontSize: 12, color: C.green, fontWeight: 600, marginBottom: 8 }}>Confirm payment →</div>
+      <div className="bt-grid" style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 8 }}>
+        <Input type="number" value={amt} onChange={e => setAmt(e.target.value)} placeholder="Amount paid" onKeyDown={e => e.key === "Enter" && save()} />
+        <Input type="date" value={d} onChange={e => setD(e.target.value)} style={{ width: 160 }} />
+        <Btn kind="success" onClick={save}>Save as ledger entry</Btn>
+        <Btn kind="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   SummaryView
+   ============================================================ */
+function SummaryView({ pid, names, entries, pending }) {
+  const [q, setQ] = useState("");
+  const [openId, setOpenId] = useState(null);
+
+  const projectNames = names.filter(n => n.pid === pid);
+  const projectEntries = entries.filter(e => e.pid === pid);
+  const projectPending = pending.filter(p => p.pid === pid && p.status === "pending");
+
+  const rows = useMemo(() => {
+    const list = projectNames.map(n => {
+      const ents = projectEntries.filter(e => e.nameId === n.id);
+      const paid = ents.filter(e => e.type === "debit").reduce((s, e) => s + Number(e.amt || 0), 0);
+      const recv = ents.filter(e => e.type === "credit").reduce((s, e) => s + Number(e.amt || 0), 0);
+      const pendAmt = projectPending.filter(p => p.nameId === n.id).reduce((s, p) => s + Number(p.amt || 0), 0);
+      return { n, ents, paid, recv, pendAmt };
+    }).filter(r => r.n.label.toLowerCase().includes(q.toLowerCase()));
+    list.sort((a, b) => b.paid - a.paid);
+    return list;
+  }, [projectNames, projectEntries, projectPending, q]);
+
+  const maxPaid = rows.reduce((m, r) => Math.max(m, r.paid), 0);
+
+  return (
+    <div>
+      <Input value={q} onChange={e => setQ(e.target.value)} placeholder="Search by name…" style={{ marginBottom: 12 }} />
+      {rows.length === 0 ? (
+        <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10, padding: 24, textAlign: "center", color: C.inkFaint }}>
+          No names match.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.map(({ n, ents, paid, recv, pendAmt }) => {
+            const isOpen = openId === n.id;
+            const pct = maxPaid > 0 ? Math.max(2, (paid / maxPaid) * 100) : 0;
+            const namePending = projectPending.filter(p => p.nameId === n.id);
+            return (
+              <div key={n.id} style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10, overflow: "hidden" }}>
+                <button onClick={() => setOpenId(isOpen ? null : n.id)} style={{
+                  display: "flex", alignItems: "center", gap: 12, width: "100%",
+                  padding: 12, background: "transparent", border: "none", cursor: "pointer", textAlign: "left",
+                }}>
+                  <Avatar name={n.label} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>{n.label}</div>
+                    <div style={{ fontSize: 12, color: C.inkFaint, marginTop: 2 }}>{ents.length} {ents.length === 1 ? "entry" : "entries"}</div>
+                    <div style={{ height: 3, background: C.rule, borderRadius: 2, marginTop: 6, overflow: "hidden", maxWidth: 200 }}>
+                      <div style={{ width: `${pct}%`, height: "100%", background: C.red }}/>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ color: C.red, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>−{fmtINR(paid)}</div>
+                    {pendAmt > 0 && <div style={{ color: C.orange, fontSize: 11, marginTop: 2 }}>Pending: {fmtINR(pendAmt)}</div>}
+                  </div>
+                  <div style={{ color: C.inkFaint, fontSize: 16, marginLeft: 6 }}>{isOpen ? "▾" : "▸"}</div>
+                </button>
+                {isOpen && (
+                  <div style={{ borderTop: `1px solid ${C.rule}`, padding: 12 }}>
+                    {ents.length === 0 ? (
+                      <div style={{ color: C.inkFaint, fontSize: 13 }}>No entries.</div>
+                    ) : (
+                      <div className="scroll-x">
+                        <table className="bt-table" style={{ width: "100%", fontSize: 13, minWidth: 400 }}>
+                          <thead>
+                            <tr style={{ borderBottom: `1px solid ${C.rule}` }}>
+                              <th style={th()}>Date</th>
+                              <th style={th()}>Details</th>
+                              <th style={{ ...th(), textAlign: "right" }}>Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[...ents].sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(e => (
+                              <tr key={e.id} style={{ borderBottom: `1px solid ${C.rule}` }}>
+                                <td style={{ ...td(), fontSize: 11, color: C.inkMid, fontFamily: "ui-monospace, SF Mono, monospace" }}>{fmtDate(e.date)}</td>
+                                <td style={{ ...td(), color: C.inkMid }}>{e.desc || "—"}</td>
+                                <td style={{ ...td(), textAlign: "right", color: e.type === "debit" ? C.red : C.green, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                                  {e.type === "debit" ? "−" : "+"}{fmtINR(e.amt)}
+                                </td>
+                              </tr>
+                            ))}
+                            <tr>
+                              <td colSpan={2} style={{ ...td(), color: C.amber, fontWeight: 600 }}>Subtotal</td>
+                              <td style={{ ...td(), color: C.amber, textAlign: "right", fontWeight: 700 }}>−{fmtINR(paid)}{recv > 0 && <span style={{ color: C.green, marginLeft: 8 }}>+{fmtINR(recv)}</span>}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {namePending.length > 0 && (
+                      <div style={{ background: C.orangeBg, border: `1px solid ${C.amberBorder}`, borderRadius: 8, padding: 10, marginTop: 10 }}>
+                        <div style={{ fontSize: 11, color: C.orange, textTransform: "uppercase", letterSpacing: 1, fontWeight: 600, marginBottom: 6 }}>Pending</div>
+                        {namePending.map(p => (
+                          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0" }}>
+                            <span style={{ color: C.inkMid }}>{p.desc || "—"}{p.dueDate && <span style={{ color: C.inkFaint, fontSize: 11, marginLeft: 6 }}>· due {fmtDate(p.dueDate)}</span>}</span>
+                            <span style={{ color: C.orange, fontWeight: 600 }}>{fmtINR(p.amt)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   NamesView
+   ============================================================ */
+function NamesView({ pid, names, entries, pending, addName, deleteName, toast }) {
+  const [val, setVal] = useState("");
+  const projectNames = names.filter(n => n.pid === pid);
+
+  const add = () => {
+    const label = val.trim();
+    if (!label) return;
+    addName({ id: uid(), pid, label });
+    setVal("");
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <Input value={val} onChange={e => setVal(e.target.value)} placeholder="Add a name (Sariya, Bajru, Cement, …)" onKeyDown={e => e.key === "Enter" && add()} />
+        <Btn kind="primary" onClick={add}>Register</Btn>
+      </div>
+
+      {projectNames.length === 0 ? (
+        <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10, padding: 24, textAlign: "center", color: C.inkFaint }}>
+          No names yet. Add the people / suppliers you regularly pay.
+        </div>
+      ) : (
+        <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10 }}>
+          {projectNames.map((n, i) => {
+            const ents = entries.filter(e => e.nameId === n.id);
+            const paid = ents.filter(e => e.type === "debit").reduce((s, e) => s + Number(e.amt || 0), 0);
+            const recv = ents.filter(e => e.type === "credit").reduce((s, e) => s + Number(e.amt || 0), 0);
+            const pendAmt = pending.filter(p => p.nameId === n.id && p.status === "pending").reduce((s, p) => s + Number(p.amt || 0), 0);
+            const net = paid - recv;
+            return (
+              <div key={n.id} style={{
+                display: "flex", alignItems: "center", gap: 12, padding: 12,
+                borderBottom: i < projectNames.length - 1 ? `1px solid ${C.rule}` : "none",
+              }}>
+                <Avatar name={n.label} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600 }}>{n.label}</div>
+                  <div style={{ fontSize: 12, color: C.inkFaint }}>
+                    {ents.length} {ents.length === 1 ? "entry" : "entries"}
+                    {paid > 0 && <> · Paid {fmtINR(paid)}</>}
+                    {recv > 0 && <> · Received {fmtINR(recv)}</>}
+                    {pendAmt > 0 && <> · Pending {fmtINR(pendAmt)}</>}
+                  </div>
+                </div>
+                <div style={{ color: net >= 0 ? C.red : C.green, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                  {net >= 0 ? "−" : "+"}{fmtINR(Math.abs(net))}
+                </div>
+                {pendAmt > 0 && (
+                  <span style={{
+                    background: C.orangeBg, color: C.orange, fontSize: 10, fontWeight: 700,
+                    padding: "2px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: 1,
+                    border: `1px solid ${C.amberBorder}`,
+                  }}>Pending</span>
+                )}
+                <button
+                  onClick={() => {
+                    if (ents.length === 0) { deleteName(n.id); return; }
+                    if (window.confirm(`Delete "${n.label}"? It has ${ents.length} entries.`)) deleteName(n.id);
+                  }}
+                  title="Delete name"
+                  style={{
+                    background: "transparent", border: "none", color: C.inkFaint,
+                    fontSize: 18, cursor: "pointer", padding: 6, lineHeight: 1,
+                  }}>×</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   ClearModal — 3-step backup-then-delete flow
+   ============================================================ */
+function ClearModal({ state, activePid, onClose, onDelete, downloadExcel, toast }) {
+  const [scope, setScope] = useState("project");
+  const [dlState, setDlState] = useState("idle"); // idle | awaiting | confirmed
+  const [filename, setFilename] = useState("");
+
+  // Reset DL state whenever the scope changes
+  useEffect(() => { setDlState("idle"); setFilename(""); }, [scope]);
+
+  const activeProject = state.projects.find(p => p.id === activePid);
+  const projEntries = state.entries.filter(e => e.pid === activePid);
+  const projPending = state.pending.filter(p => p.pid === activePid);
+  const projNames = state.names.filter(n => n.pid === activePid);
+
+  const triggerDownload = () => {
+    const fn = downloadExcel(scope === "all" ? "ALL" : activePid);
+    setFilename(fn);
+    setDlState("awaiting");
+  };
+
+  const stepBubble = (n, label, done) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+      <div style={{
+        width: 22, height: 22, borderRadius: "50%",
+        background: done ? C.green : C.rule,
+        color: done ? "#fff" : C.inkMid,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 11, fontWeight: 700,
+      }}>{done ? "✓" : n}</div>
+      <span style={{ color: done ? C.green : C.inkMid, fontWeight: done ? 600 : 400 }}>{label}</span>
+    </div>
+  );
+
+  return (
+    <Modal title="Clear data" onClose={onClose}>
+      {/* Progress indicator */}
+      <div style={{ display: "flex", gap: 14, marginBottom: 18, alignItems: "center", flexWrap: "wrap" }}>
+        {stepBubble(1, "Choose scope", true)}
+        <div style={{ flex: 1, height: 1, background: C.rule, minWidth: 20 }}/>
+        {stepBubble(2, "Download backup", dlState === "confirmed")}
+        <div style={{ flex: 1, height: 1, background: C.rule, minWidth: 20 }}/>
+        {stepBubble(3, "Delete data", false)}
+      </div>
+
+      {/* Step 1: scope */}
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>1. Choose scope</div>
+        <label style={{ display: "block", padding: 10, border: `1px solid ${scope === "project" ? C.amber : C.rule}`, borderRadius: 8, cursor: "pointer", background: scope === "project" ? C.amberBg : C.surface, marginBottom: 8 }}>
+          <input type="radio" checked={scope === "project"} onChange={() => setScope("project")} style={{ marginRight: 8 }}/>
+          <b>Current project only — {activeProject?.name}</b>
+          <div style={{ fontSize: 12, color: C.inkMid, marginTop: 4, paddingLeft: 24 }}>
+            {projEntries.length} entries · {projPending.length} pending · {projNames.length} names
+          </div>
+        </label>
+        <label style={{ display: "block", padding: 10, border: `1px solid ${scope === "all" ? C.red : C.rule}`, borderRadius: 8, cursor: "pointer", background: scope === "all" ? C.redBg : C.surface }}>
+          <input type="radio" checked={scope === "all"} onChange={() => setScope("all")} style={{ marginRight: 8 }}/>
+          <b style={{ color: scope === "all" ? C.red : C.ink }}>Everything — all projects</b>
+          <div style={{ fontSize: 12, color: C.inkMid, marginTop: 4, paddingLeft: 24 }}>
+            {state.projects.length} projects · {state.entries.length} entries · {state.pending.length} pending
+          </div>
+        </label>
+      </div>
+
+      {/* Step 2: backup */}
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>2. Download backup (required)</div>
+        {dlState === "idle" && (
+          <div style={{ background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 13, color: C.amber, fontWeight: 600, marginBottom: 8 }}>Download backup first — required</div>
+            <div style={{ fontSize: 12, color: C.inkMid, marginBottom: 10 }}>
+              Saves an Excel file you can restore from later via Load Excel.
+            </div>
+            <Btn kind="primary" onClick={triggerDownload}>⬇ Download now</Btn>
+          </div>
+        )}
+        {dlState === "awaiting" && (
+          <div style={{ background: C.blueBg, border: `1px solid #BFDBFE`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 13, color: C.blue, fontWeight: 600, marginBottom: 6 }}>Did you click "Download file" in the dialog?</div>
+            <div style={{ fontFamily: "ui-monospace, SF Mono, monospace", fontSize: 12, color: C.inkMid, background: "#fff", padding: "6px 8px", borderRadius: 6, marginBottom: 10, wordBreak: "break-all" }}>{filename}</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn kind="success" onClick={() => setDlState("confirmed")}>✓ Yes, file is saved</Btn>
+              <Btn kind="ghost" onClick={triggerDownload}>↩ No — try again</Btn>
+            </div>
+          </div>
+        )}
+        {dlState === "confirmed" && (
+          <div style={{ background: C.greenBg, border: `1px solid ${C.greenLight}`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 13, color: C.green, fontWeight: 600 }}>✓ Backup confirmed</div>
+            <div style={{ fontFamily: "ui-monospace, SF Mono, monospace", fontSize: 12, color: C.inkMid, marginTop: 4, wordBreak: "break-all" }}>{filename}</div>
+            <button onClick={triggerDownload} style={{ background: "transparent", border: "none", color: C.blue, cursor: "pointer", padding: 0, marginTop: 6, fontSize: 12, textDecoration: "underline" }}>Re-download</button>
+          </div>
+        )}
+      </div>
+
+      {/* Step 3: delete */}
+      <div>
+        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>3. Delete data</div>
+        <div style={{ position: "relative" }}>
+          {dlState !== "confirmed" && (
+            <div style={{
+              position: "absolute", top: -28, left: 0, right: 0, textAlign: "center",
+              fontSize: 11, color: C.inkFaint,
+            }}>
+              {dlState === "idle" ? "Download backup first ↑" : "Confirm download above ↑"}
+            </div>
+          )}
+          <Btn
+            kind="danger"
+            disabled={dlState !== "confirmed"}
+            onClick={() => onDelete(scope)}
+            style={{
+              width: "100%", height: 48, fontSize: 15, fontWeight: 600,
+              opacity: dlState === "confirmed" ? 1 : 0.38,
+              pointerEvents: dlState === "confirmed" ? "auto" : "none",
+              cursor: dlState === "confirmed" ? "pointer" : "not-allowed",
+              color: "#fff", background: C.red, borderColor: C.red,
+            }}
+          >🗑 Delete data</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
+   EditProjectModal
+   ============================================================ */
+function EditProjectModal({ project, onSave, onDelete, onClose }) {
+  const [name, setName] = useState(project.name || "");
+  const [location, setLocation] = useState(project.location || "");
+  const [startDate, setStartDate] = useState(project.startDate || "");
+  const [budget, setBudget] = useState(project.budget != null ? String(project.budget) : "");
+  const [status, setStatus] = useState(project.status || "Active");
+  const [notes, setNotes] = useState(project.notes || "");
+
+  const save = () => {
+    if (!name.trim()) return;
+    onSave({
+      ...project,
+      name: name.trim(),
+      location: location.trim(),
+      startDate,
+      budget: budget === "" ? null : (Number(budget) || 0),
+      status,
+      notes: notes.trim(),
+    });
+    onClose();
+  };
+
+  const labelStyle = { fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4, display: "block" };
+
+  return (
+    <Modal title="Edit project" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div>
+          <label style={labelStyle}>Project name *</label>
+          <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Lokesh Nagar" />
+        </div>
+        <div>
+          <label style={labelStyle}>Location</label>
+          <Input value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Bhopal, MP" />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }} className="bt-grid">
+          <div>
+            <label style={labelStyle}>Status</label>
+            <Select value={status} onChange={e => setStatus(e.target.value)}>
+              <option>Active</option>
+              <option>On Hold</option>
+              <option>Completed</option>
+            </Select>
+          </div>
+          <div>
+            <label style={labelStyle}>Start date</label>
+            <Input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
+          </div>
+        </div>
+        <div>
+          <label style={labelStyle}>Budget (₹) — optional</label>
+          <Input type="number" min="0" value={budget} onChange={e => setBudget(e.target.value)} placeholder="e.g. 1250000" />
+        </div>
+        <div>
+          <label style={labelStyle}>Notes</label>
+          <textarea
+            value={notes} onChange={e => setNotes(e.target.value)}
+            placeholder="Anything else worth remembering about this project"
+            style={{
+              width: "100%", minHeight: 80, padding: "10px 12px", borderRadius: 8,
+              border: `1px solid ${C.ruleDark}`, background: C.surface, color: C.ink,
+              outline: "none", fontFamily: "inherit", fontSize: 14, resize: "vertical",
+            }}
+          />
+        </div>
+
+        <div style={{
+          display: "flex", justifyContent: "space-between", gap: 8, marginTop: 8,
+          paddingTop: 12, borderTop: `1px solid ${C.rule}`, flexWrap: "wrap",
+        }} className="bt-grid">
+          <Btn kind="danger" onClick={() => onDelete(project.id)}>🗑 Delete project</Btn>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn kind="ghost" onClick={onClose}>Cancel</Btn>
+            <Btn kind="primary" onClick={save}>Save</Btn>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
+   App
+   ============================================================ */
+function App() {
+  const initial = useMemo(loadFromLS, []);
+  const [projects, setProjects] = useState(initial.projects);
+  const [names, setNames]       = useState(initial.names);
+  const [entries, setEntries]   = useState(initial.entries);
+  const [pending, setPending]   = useState(initial.pending);
+  const [activePid, setActivePid] = useState(initial.projects[0]?.id || "");
+  const [tab, setTab] = useState("ledger");
+  const [toast, setToast] = useState({ msg: "", kind: "" });
+  const [showClear, setShowClear] = useState(false);
+  const [editingProject, setEditingProject] = useState(null);
+  const fileRef = useRef(null);
+
+  // Persist on every change
+  useEffect(() => {
+    saveAll({ projects, names, entries, pending });
+  }, [projects, names, entries, pending]);
+
+  const showToast = (msg, kind = "info") => setToast({ msg, kind });
+
+  // Mutators
+  const addEntry  = (e) => setEntries(list => [...list, e]);
+  const addName   = (n) => setNames(list => [...list, n]);
+  const deleteName = (id) => {
+    setNames(list => list.filter(n => n.id !== id));
+    setEntries(list => list.filter(e => e.nameId !== id));
+    setPending(list => list.filter(p => p.nameId !== id));
+    showToast("Name deleted", "info");
+  };
+  const addPending = (p) => setPending(list => [...list, p]);
+  const clearPending = (id, clearedAmt, clearedOn) => {
+    const target = pending.find(p => p.id === id);
+    if (!target) return;
+    setPending(list => list.map(p => p.id === id ? { ...p, status: "cleared", clearedOn, clearedAmt } : p));
+    const entry = {
+      id: uid(), pid: target.pid, nameId: target.nameId, date: clearedOn,
+      desc: `${target.desc || "Pending"} (cleared pending)`,
+      amt: clearedAmt, type: "debit",
+    };
+    setEntries(list => [...list, entry]);
+    showToast("Pending cleared, ledger entry added ✓", "success");
+  };
+
+  const addProject = () => {
+    const nm = window.prompt("New project name:");
+    if (!nm || !nm.trim()) return;
+    const p = { id: uid(), name: nm.trim() };
+    setProjects(list => [...list, p]);
+    setActivePid(p.id);
+    setTab("ledger");
+  };
+
+  const saveProject = (updated) => {
+    setProjects(list => list.map(p => p.id === updated.id ? updated : p));
+    showToast("Project updated ✓", "success");
+  };
+
+  const deleteProjectFromEdit = (id) => {
+    const target = projects.find(p => p.id === id);
+    if (!target) return;
+    const ents = entries.filter(e => e.pid === id).length;
+    const pn = pending.filter(p => p.pid === id).length;
+    const msg = ents + pn > 0
+      ? `Delete project "${target.name}"? This will also remove ${ents} entries and ${pn} pending records.`
+      : `Delete empty project "${target.name}"?`;
+    if (!window.confirm(msg)) return;
+    setEntries(list => list.filter(e => e.pid !== id));
+    setPending(list => list.filter(p => p.pid !== id));
+    setNames(list => list.filter(n => n.pid !== id));
+    const remaining = projects.filter(p => p.id !== id);
+    if (remaining.length === 0) {
+      const fresh = { id: uid(), name: "New Project" };
+      setProjects([fresh]);
+      setActivePid(fresh.id);
+    } else {
+      setProjects(remaining);
+      if (activePid === id) setActivePid(remaining[0].id);
+    }
+    setEditingProject(null);
+    showToast("Project deleted", "info");
+  };
+
+  /* ---- Excel export ---- */
+  const exportExcel = (scope = activePid) => {
+    const wb = XLSX.utils.book_new();
+    const isAll = scope === "ALL";
+    const projList = isAll ? projects : projects.filter(p => p.id === scope);
+    const projIds = new Set(projList.map(p => p.id));
+    const projName = id => projects.find(p => p.id === id)?.name || "";
+    const nameLabel = id => names.find(n => n.id === id)?.label || "";
+
+    const projRows = projList.map(p => ({
+      ID: p.id, Name: p.name,
+      Location: p.location || "", Status: p.status || "",
+      StartDate: p.startDate || "", Budget: p.budget != null ? Number(p.budget) : "",
+      Notes: p.notes || "",
+    }));
+    const nameRows = names.filter(n => projIds.has(n.pid)).map(n => ({
+      ID: n.id, ProjectID: n.pid, Project: projName(n.pid), Name: n.label,
+    }));
+    const ledgerRows = entries.filter(e => projIds.has(e.pid)).map(e => ({
+      ID: e.id, ProjectID: e.pid, Project: projName(e.pid),
+      NameID: e.nameId, Name: nameLabel(e.nameId),
+      Date: e.date, Description: e.desc, Amount: Number(e.amt) || 0, Type: e.type,
+    }));
+    const pendRows = pending.filter(p => projIds.has(p.pid)).map(p => ({
+      ID: p.id, ProjectID: p.pid, Project: projName(p.pid),
+      NameID: p.nameId, Name: nameLabel(p.nameId),
+      Description: p.desc, Amount: Number(p.amt) || 0,
+      DueDate: p.dueDate, Status: p.status, CreatedAt: p.createdAt,
+      ClearedOn: p.clearedOn || "", ClearedAmount: Number(p.clearedAmt) || 0,
+    }));
+
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(projRows,   { header: ["ID","Name","Location","Status","StartDate","Budget","Notes"] }), "Projects");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(nameRows,   { header: ["ID","ProjectID","Project","Name"] }), "Names");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ledgerRows, { header: ["ID","ProjectID","Project","NameID","Name","Date","Description","Amount","Type"] }), "Ledger");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pendRows,   { header: ["ID","ProjectID","Project","NameID","Name","Description","Amount","DueDate","Status","CreatedAt","ClearedOn","ClearedAmount"] }), "Pending");
+
+    const projNm = isAll ? "ALL" : (projects.find(p => p.id === scope)?.name || "project").replace(/[^\w\s-]/g, "").replace(/\s+/g, "_");
+    const filename = `buildtrack_${projNm}_${today()}.xlsx`;
+    XLSX.writeFile(wb, filename);
+    return filename;
+  };
+
+  const saveExcel = () => {
+    const fn = exportExcel(activePid);
+    showToast(`Saved ${fn}`, "success");
+  };
+
+  /* ---- Excel import ---- */
+  const onPickFile = () => fileRef.current?.click();
+  const onFile = (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    file.arrayBuffer().then(buf => {
+      try {
+        const wb = XLSX.read(buf, { type: "array" });
+        const projRows = XLSX.utils.sheet_to_json(wb.Sheets["Projects"] || {}, { defval: "" });
+        const nameRows = XLSX.utils.sheet_to_json(wb.Sheets["Names"]    || {}, { defval: "" });
+        const ledRows  = XLSX.utils.sheet_to_json(wb.Sheets["Ledger"]   || {}, { defval: "" });
+        const pendRows = XLSX.utils.sheet_to_json(wb.Sheets["Pending"]  || {}, { defval: "" });
+
+        const mergeBy = (existing, incoming, build) => {
+          const map = new Map(existing.map(x => [x.id, x]));
+          incoming.forEach(row => {
+            const rec = build(row);
+            if (rec && rec.id) map.set(rec.id, rec);
+          });
+          return Array.from(map.values());
+        };
+
+        const newProjects = mergeBy(projects, projRows, r => r.ID ? ({
+          id: String(r.ID),
+          name: String(r.Name || "Untitled"),
+          location: String(r.Location || ""),
+          status: String(r.Status || ""),
+          startDate: String(r.StartDate || ""),
+          budget: r.Budget === "" || r.Budget == null ? null : Number(r.Budget),
+          notes: String(r.Notes || ""),
+        }) : null);
+        const newNames    = mergeBy(names,    nameRows, r => r.ID ? ({ id: String(r.ID), pid: String(r.ProjectID), label: String(r.Name || "") }) : null);
+        const newEntries  = mergeBy(entries,  ledRows,  r => r.ID ? ({
+          id: String(r.ID), pid: String(r.ProjectID), nameId: String(r.NameID),
+          date: String(r.Date || today()), desc: String(r.Description || ""),
+          amt: Number(r.Amount) || 0, type: (String(r.Type).toLowerCase() === "credit") ? "credit" : "debit",
+        }) : null);
+        const newPending  = mergeBy(pending,  pendRows, r => r.ID ? ({
+          id: String(r.ID), pid: String(r.ProjectID), nameId: String(r.NameID),
+          desc: String(r.Description || ""), amt: Number(r.Amount) || 0,
+          dueDate: String(r.DueDate || ""), status: (String(r.Status).toLowerCase() === "cleared") ? "cleared" : "pending",
+          createdAt: String(r.CreatedAt || today()),
+          clearedOn: String(r.ClearedOn || ""), clearedAmt: Number(r.ClearedAmount) || 0,
+        }) : null);
+
+        setProjects(newProjects);
+        setNames(newNames);
+        setEntries(newEntries);
+        setPending(newPending);
+        showToast(`Imported ${ledRows.length} entries, ${pendRows.length} pending ✓`, "success");
+      } catch (err) {
+        console.error(err);
+        showToast("Import failed: " + err.message, "error");
+      } finally {
+        ev.target.value = "";
+      }
+    });
+  };
+
+  /* ---- Email export ---- */
+  const sendEmail = () => {
+    const proj = projects.find(p => p.id === activePid);
+    if (!proj) return;
+    const projEntries = entries.filter(e => e.pid === activePid);
+    const projPending = pending.filter(p => p.pid === activePid && p.status === "pending");
+    const totalDebit = projEntries.filter(e => e.type === "debit").reduce((s, e) => s + Number(e.amt || 0), 0);
+    const totalCredit = projEntries.filter(e => e.type === "credit").reduce((s, e) => s + Number(e.amt || 0), 0);
+    const totalPending = projPending.reduce((s, p) => s + Number(p.amt || 0), 0);
+    const nameLabel = id => names.find(n => n.id === id)?.label || "";
+
+    const byName = {};
+    projEntries.filter(e => e.type === "debit").forEach(e => {
+      const l = nameLabel(e.nameId);
+      byName[l] = (byName[l] || 0) + Number(e.amt || 0);
+    });
+    const sortedByName = Object.entries(byName).sort((a, b) => b[1] - a[1]);
+
+    const body = [
+      `BuildTrack Report — ${proj.name}`,
+      `Generated: ${fmtDate(today())}`,
+      "========================================",
+      "",
+      "SUMMARY",
+      `  Total Paid Out : Rs ${Math.round(totalDebit).toLocaleString("en-IN")}`,
+      `  Total Received : Rs ${Math.round(totalCredit).toLocaleString("en-IN")}`,
+      `  Net Outflow    : Rs ${Math.round(totalDebit - totalCredit).toLocaleString("en-IN")}`,
+      `  Pending Amount : Rs ${Math.round(totalPending).toLocaleString("en-IN")}`,
+      "",
+      "PAID BY NAME",
+      ...sortedByName.map(([l, v]) => `  ${l}: -Rs ${Math.round(v).toLocaleString("en-IN")}`),
+      "",
+      `PENDING PAYMENTS (${projPending.length})`,
+      ...projPending.map(p => `  ${nameLabel(p.nameId)} — ${p.desc || "—"} — Rs ${Math.round(p.amt).toLocaleString("en-IN")}${p.dueDate ? ` (Due: ${fmtDate(p.dueDate)})` : ""}`),
+      "",
+      "========================================",
+      "(Exported from BuildTrack Field Ledger)",
+    ].join("\n");
+
+    const subject = `BuildTrack Report — ${proj.name} — ${fmtDate(today())}`;
+    window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
+  };
+
+  const doDelete = (scope) => {
+    if (scope === "all") {
+      const fresh = { id: uid(), name: "New Project" };
+      setProjects([fresh]);
+      setNames([]); setEntries([]); setPending([]);
+      setActivePid(fresh.id);
+    } else {
+      const remaining = projects.filter(p => p.id !== activePid);
+      setNames(list => list.filter(n => n.pid !== activePid));
+      setEntries(list => list.filter(e => e.pid !== activePid));
+      setPending(list => list.filter(p => p.pid !== activePid));
+      if (remaining.length === 0) {
+        const fresh = { id: uid(), name: "New Project" };
+        setProjects([fresh]);
+        setActivePid(fresh.id);
+      } else {
+        setProjects(remaining);
+        setActivePid(remaining[0].id);
+      }
+    }
+    setShowClear(false);
+    setTab("ledger");
+    showToast("Backup saved — data cleared ✓", "success");
+  };
+
+  const activeProject = projects.find(p => p.id === activePid);
+  const pendingCount = pending.filter(p => p.pid === activePid && p.status === "pending").length;
+
+  /* ---- Render ---- */
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg }}>
+      <header style={{ background: C.surface, borderBottom: `1px solid ${C.rule}`, padding: "12px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <span style={{ fontSize: 18, fontWeight: 700, color: C.amber }}>BuildTrack</span>
+            <span style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 2 }}>Field Ledger</span>
+          </div>
+          <div className="bt-toolbar" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <Btn kind="ghost" onClick={saveExcel} title="Save Excel">
+              <span>⬇</span><span className="bt-label-long">&nbsp;Save Excel</span>
+            </Btn>
+            <Btn kind="ghost" onClick={onPickFile} title="Load Excel">
+              <span>⬆</span><span className="bt-label-long">&nbsp;Load Excel</span>
+            </Btn>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={onFile} style={{ display: "none" }}/>
+            <Btn kind="ghost" onClick={sendEmail} title="Send Email">
+              <span>✉</span><span className="bt-label-long">&nbsp;Send Email</span>
+            </Btn>
+            <div style={{ width: 1, background: C.rule, margin: "0 2px" }}/>
+            <Btn kind="danger" onClick={() => setShowClear(true)} title="Clear data">
+              <span>🗑</span><span className="bt-label-long">&nbsp;Clear</span>
+            </Btn>
+          </div>
+        </div>
+        <ProjectChips
+          projects={projects} activePid={activePid}
+          onSelect={(id) => { setActivePid(id); setTab("ledger"); }}
+          onNew={addProject}
+        />
+        {activeProject && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <h1 className="bt-project-title" style={{ fontSize: 22, fontWeight: 700, margin: 0, color: C.ink }}>{activeProject.name}</h1>
+              <button
+                onClick={() => setEditingProject(activeProject)}
+                title="Edit project"
+                style={{
+                  background: "transparent", border: "none", color: C.inkFaint,
+                  fontSize: 16, cursor: "pointer", padding: "4px 6px",
+                  minHeight: 32, minWidth: 32,
+                }}>✎</button>
+            </div>
+            {(activeProject.location || activeProject.status || activeProject.budget != null || activeProject.startDate) && (
+              <div style={{ fontSize: 12, color: C.inkFaint, marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                {activeProject.location && <span>📍 {activeProject.location}</span>}
+                {activeProject.status   && <span>· {activeProject.status}</span>}
+                {activeProject.startDate && <span>· Started {fmtDate(activeProject.startDate)}</span>}
+                {activeProject.budget != null && activeProject.budget > 0 && <span>· Budget {fmtINR(activeProject.budget)}</span>}
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{ marginTop: 12 }}>
+          <TabBar tab={tab} setTab={setTab} pendingCount={pendingCount} />
+        </div>
+      </header>
+
+      <main style={{ padding: 16, maxWidth: 1280, margin: "0 auto" }}>
+        {tab === "ledger"  && <LedgerView  pid={activePid} names={names} entries={entries} addEntry={addEntry} addName={addName}/>}
+        {tab === "pending" && <PendingView pid={activePid} names={names} pending={pending} addPending={addPending} clearPending={clearPending} addName={addName}/>}
+        {tab === "summary" && <SummaryView pid={activePid} names={names} entries={entries} pending={pending}/>}
+        {tab === "names"   && <NamesView   pid={activePid} names={names} entries={entries} pending={pending} addName={addName} deleteName={deleteName} toast={showToast}/>}
+      </main>
+
+      {showClear && (
+        <ClearModal
+          state={{ projects, names, entries, pending }}
+          activePid={activePid}
+          onClose={() => setShowClear(false)}
+          onDelete={doDelete}
+          downloadExcel={exportExcel}
+          toast={showToast}
+        />
+      )}
+
+      {editingProject && (
+        <EditProjectModal
+          project={editingProject}
+          onSave={saveProject}
+          onDelete={deleteProjectFromEdit}
+          onClose={() => setEditingProject(null)}
+        />
+      )}
+
+      <Toast msg={toast.msg} kind={toast.kind} onDone={() => setToast({ msg: "", kind: "" })}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+<!-- Inline service worker for offline support -->
+<script>
+if ("serviceWorker" in navigator) {
+  const sw = `
+    self.addEventListener('install', e => {
+      e.waitUntil(caches.open('buildtrack-v1').then(c => c.addAll([location.pathname])));
+      self.skipWaiting();
+    });
+    self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+    self.addEventListener('fetch', e => {
+      e.respondWith(caches.match(e.request).then(r => r || fetch(e.request).catch(()=>caches.match(e.request))));
+    });
+  `;
+  const blob = new Blob([sw], { type: "text/javascript" });
+  navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(()=>{});
+}
+</script>
+
+</body>
+</html>
