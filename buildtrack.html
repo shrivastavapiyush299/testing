@@ -224,6 +224,231 @@ const saveAll = (state) => {
 };
 
 /* ============================================================
+   Drive sync — config + low-level Drive REST helpers
+   ============================================================ */
+const GOOGLE_CLIENT_ID = "786700867712-nra7n5jvpgb3qhakt01gar6o36c3k57e.apps.googleusercontent.com";
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const DRIVE_FOLDER_NAME = "BuildTrack";
+const DRIVE_FILE_NAME = "data.json";
+const SCHEMA_VERSION = 1;
+
+// Stamp a record with updatedAt/updatedBy. Used by all mutations so sync conflict
+// detection works. If updatedBy is empty (signed out), leave it blank.
+const stamp = (rec, userEmail) => ({
+  ...rec,
+  updatedAt: new Date().toISOString(),
+  updatedBy: userEmail || rec.updatedBy || "",
+});
+
+// Backfill: any record without updatedAt gets one based on createdAt.
+const migrateRecord = (r) => r.updatedAt ? r : { ...r, updatedAt: r.createdAt || new Date(0).toISOString(), updatedBy: r.updatedBy || "" };
+const migrateAll = (state) => ({
+  projects: (state.projects || []).map(migrateRecord),
+  names:    (state.names    || []).map(migrateRecord),
+  entries:  (state.entries  || []).map(migrateRecord),
+  pending:  (state.pending  || []).map(migrateRecord),
+});
+
+/* ---- Google Identity Services + Drive REST -----------------
+   We load GIS dynamically (one-time) and use raw fetch for Drive calls.
+   The token client lives in module scope; the access token is in-memory only.
+------------------------------------------------------------- */
+let _tokenClient = null;
+let _accessToken = null;
+let _userEmail = "";
+let _userName = "";
+let _gisReady = null; // promise
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src; s.async = true; s.defer = true;
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function ensureGIS() {
+  if (_gisReady) return _gisReady;
+  _gisReady = (async () => {
+    await loadScript("https://accounts.google.com/gsi/client");
+    // Wait for window.google.accounts.oauth2 to be available
+    let tries = 0;
+    while (!(window.google && window.google.accounts && window.google.accounts.oauth2) && tries < 50) {
+      await new Promise(r => setTimeout(r, 50)); tries++;
+    }
+    if (!window.google?.accounts?.oauth2) throw new Error("Google Identity Services failed to load");
+  })();
+  return _gisReady;
+}
+
+async function requestAccessToken({ prompt = "" } = {}) {
+  await ensureGIS();
+  return new Promise((resolve, reject) => {
+    _tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: DRIVE_SCOPE,
+      prompt,
+      callback: (resp) => {
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        _accessToken = resp.access_token;
+        // GIS doesn't directly give us the user email. We fetch it via Drive's about endpoint.
+        fetch("https://www.googleapis.com/drive/v3/about?fields=user", {
+          headers: { Authorization: `Bearer ${_accessToken}` },
+        }).then(r => r.json()).then(info => {
+          _userEmail = info?.user?.emailAddress || "";
+          _userName = info?.user?.displayName || "";
+          resolve({ accessToken: _accessToken, email: _userEmail, name: _userName });
+        }).catch(reject);
+      },
+      error_callback: (err) => reject(new Error(err.type || "auth_error")),
+    });
+    _tokenClient.requestAccessToken({ prompt });
+  });
+}
+
+async function silentRefresh() {
+  // GIS supports silent token refresh by calling requestAccessToken with prompt=''.
+  // If the user previously granted consent, this returns a fresh token without UI.
+  try {
+    return await requestAccessToken({ prompt: "" });
+  } catch (e) {
+    return null;
+  }
+}
+
+function signOutAccount() {
+  if (_accessToken && window.google?.accounts?.oauth2) {
+    try { window.google.accounts.oauth2.revoke(_accessToken, () => {}); } catch (_) {}
+  }
+  _accessToken = null;
+  _userEmail = "";
+  _userName = "";
+}
+
+/* ---- Drive REST helpers ------------------------------------ */
+async function driveFetch(path, opts = {}) {
+  if (!_accessToken) throw new Error("not_authenticated");
+  const headers = { ...(opts.headers || {}), Authorization: `Bearer ${_accessToken}` };
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401) {
+    // Token expired mid-flight — try silent refresh once and retry
+    const refreshed = await silentRefresh();
+    if (!refreshed) throw new Error("auth_expired");
+    const headers2 = { ...(opts.headers || {}), Authorization: `Bearer ${_accessToken}` };
+    return fetch(path, { ...opts, headers: headers2 });
+  }
+  return r;
+}
+
+async function driveFindOrCreateFolder() {
+  const q = encodeURIComponent(`name='${DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+  if (!r.ok) throw new Error("drive_list_failed:" + r.status);
+  const data = await r.json();
+  if (data.files && data.files.length > 0) return data.files[0].id;
+  // Create folder
+  const c = await driveFetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }),
+  });
+  if (!c.ok) throw new Error("drive_create_folder_failed:" + c.status);
+  return (await c.json()).id;
+}
+
+async function driveFindDataFile(folderId) {
+  const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and '${folderId}' in parents and trashed=false`);
+  const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)`);
+  if (!r.ok) throw new Error("drive_list_file_failed:" + r.status);
+  const data = await r.json();
+  return data.files && data.files.length > 0 ? data.files[0] : null;
+}
+
+async function driveCreateDataFile(folderId, payload) {
+  // multipart upload — metadata + content in one request
+  const boundary = "buildtrack_" + Math.random().toString(36).slice(2);
+  const metadata = { name: DRIVE_FILE_NAME, parents: [folderId], mimeType: "application/json" };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    JSON.stringify(metadata) +
+    `\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n` +
+    JSON.stringify(payload) +
+    `\r\n--${boundary}--`;
+  const r = await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime", {
+    method: "POST",
+    headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  if (!r.ok) throw new Error("drive_create_file_failed:" + r.status);
+  return await r.json();
+}
+
+async function driveReadDataFile(fileId) {
+  const r = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  if (!r.ok) throw new Error("drive_read_failed:" + r.status);
+  return await r.json();
+}
+
+async function driveUpdateDataFile(fileId, payload) {
+  const r = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,modifiedTime`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error("drive_update_failed:" + r.status);
+  return await r.json();
+}
+
+async function driveHeadModifiedTime(fileId) {
+  const r = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=modifiedTime`);
+  if (!r.ok) throw new Error("drive_head_failed:" + r.status);
+  return (await r.json()).modifiedTime;
+}
+
+/* ---- Merge logic --------------------------------------------
+   Per-record last-write-wins.
+   Tracks overwrites: cases where our local edit replaced a recent
+   edit from a different user.
+------------------------------------------------------------- */
+function mergeSlice(local, remote, lastPulledAt, currentUserEmail) {
+  const map = new Map((local || []).map(r => [r.id, r]));
+  const overwrites = [];
+  (remote || []).forEach(r => {
+    const ex = map.get(r.id);
+    if (!ex) {
+      map.set(r.id, r);
+    } else {
+      const remoteAt = r.updatedAt || "";
+      const localAt  = ex.updatedAt || "";
+      if (remoteAt > localAt) {
+        map.set(r.id, r);  // remote wins
+      } else if (localAt > remoteAt) {
+        // Local newer. Did we overwrite a recent edit from someone else?
+        const otherUser = r.updatedBy && r.updatedBy !== currentUserEmail;
+        const remoteRecent = lastPulledAt && remoteAt && remoteAt > lastPulledAt;
+        if (otherUser && remoteRecent) {
+          overwrites.push({ id: r.id, local: ex, remote: r });
+        }
+      }
+    }
+  });
+  return { records: Array.from(map.values()), overwrites };
+}
+
+function mergeAll(local, remote, lastPulledAt, currentUserEmail) {
+  const out = { projects: null, names: null, entries: null, pending: null };
+  const allOverwrites = [];
+  ["projects", "names", "entries", "pending"].forEach(k => {
+    const { records, overwrites } = mergeSlice(local[k], remote[k], lastPulledAt, currentUserEmail);
+    out[k] = records;
+    overwrites.forEach(o => allOverwrites.push({ slice: k, ...o }));
+  });
+  return { state: out, overwrites: allOverwrites };
+}
+
+/* ============================================================
    Shared UI building blocks
    ============================================================ */
 const Avatar = ({ name, size = 32 }) => (
@@ -1124,6 +1349,135 @@ function ClearModal({ state, activePid, onClose, onDelete, downloadExcel, toast 
 }
 
 /* ============================================================
+   SyncPill — small status dot + menu
+   ============================================================ */
+function SyncPill({ status, syncedAt, user, onSignIn, onSignOut, onForcePull, onForcePush }) {
+  const [open, setOpen] = useState(false);
+  const colors = {
+    "synced":     { dot: C.green,  label: "Synced",   bg: C.greenBg,   border: C.greenLight },
+    "pending":    { dot: C.amber,  label: "Saving…",  bg: C.amberBg,   border: C.amberBorder },
+    "syncing":    { dot: C.blue,   label: "Syncing",  bg: C.blueBg,    border: "#BFDBFE" },
+    "offline":    { dot: C.red,    label: "Offline",  bg: C.redBg,     border: C.redLight },
+    "signed-out": { dot: C.inkFaint,label: "Sign in", bg: C.surface,   border: C.rule },
+  }[status] || { dot: C.inkFaint, label: "—", bg: C.surface, border: C.rule };
+
+  let label = colors.label;
+  if (status === "synced" && syncedAt) {
+    const secs = Math.max(0, Math.floor((Date.now() - syncedAt.getTime()) / 1000));
+    if (secs < 60) label = `Synced ${secs}s ago`;
+    else if (secs < 3600) label = `Synced ${Math.floor(secs / 60)}m ago`;
+    else label = `Synced ${Math.floor(secs / 3600)}h ago`;
+  }
+
+  if (status === "signed-out") {
+    return (
+      <button onClick={onSignIn} title="Sign in to Google" style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        height: 36, padding: "0 10px", borderRadius: 6,
+        border: `1px solid ${colors.border}`, background: colors.bg, color: C.inkMid,
+        cursor: "pointer", fontSize: 12,
+      }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: colors.dot, display: "inline-block" }}/>
+        Sign in
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        height: 36, padding: "0 10px", borderRadius: 6,
+        border: `1px solid ${colors.border}`, background: colors.bg, color: C.inkMid,
+        cursor: "pointer", fontSize: 12,
+      }} title={user ? `Signed in as ${user.email}` : "Sync"}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: colors.dot, display: "inline-block",
+                       animation: status === "syncing" ? "toastIn 0.6s ease-in-out infinite alternate" : "none" }}/>
+        <span>{label}</span>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 50 }}/>
+          <div style={{
+            position: "absolute", top: 42, right: 0, zIndex: 60,
+            background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 8,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 220, padding: 6,
+          }}>
+            {user && (
+              <div style={{ padding: "8px 10px", borderBottom: `1px solid ${C.rule}`, marginBottom: 4 }}>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>{user.name || user.email}</div>
+                <div style={{ fontSize: 11, color: C.inkFaint }}>{user.email}</div>
+              </div>
+            )}
+            <MenuItem onClick={() => { setOpen(false); onForcePull(); }}>↓ Pull now</MenuItem>
+            <MenuItem onClick={() => { setOpen(false); onForcePush(); }}>↑ Push now</MenuItem>
+            <MenuItem onClick={() => { setOpen(false); onSignOut(); }} danger>Sign out</MenuItem>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MenuItem({ onClick, children, danger }) {
+  return (
+    <button onClick={onClick} style={{
+      display: "block", width: "100%", textAlign: "left",
+      padding: "8px 10px", background: "transparent", border: "none",
+      color: danger ? C.red : C.ink, cursor: "pointer", borderRadius: 4, fontSize: 13,
+    }}
+    onMouseEnter={e => e.currentTarget.style.background = C.bg}
+    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+    >{children}</button>
+  );
+}
+
+/* ============================================================
+   OverwriteModal — review what was overwritten, restore remote versions
+   ============================================================ */
+function OverwriteModal({ overwrites, onClose, onRestore, onClearAll }) {
+  return (
+    <Modal title={`Overwrites (${overwrites.length})`} onClose={onClose}>
+      <div style={{ fontSize: 13, color: C.inkMid, marginBottom: 12 }}>
+        Your edits replaced these records. Tap <b>Restore</b> to bring back the version from Drive.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: "60vh", overflowY: "auto" }}>
+        {overwrites.map((o, i) => (
+          <div key={i} style={{ background: C.bg, border: `1px solid ${C.rule}`, borderRadius: 8, padding: 10 }}>
+            <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>
+              {o.slice} · ID {String(o.id).slice(-6)}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }} className="bt-grid">
+              <div style={{ background: C.surface, padding: 8, borderRadius: 6, border: `1px solid ${C.rule}` }}>
+                <div style={{ fontSize: 10, color: C.green, fontWeight: 600, marginBottom: 4 }}>YOUR VERSION (kept)</div>
+                <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word", color: C.ink }}>{JSON.stringify(stripMeta(o.local), null, 2)}</pre>
+                <div style={{ fontSize: 10, color: C.inkFaint, marginTop: 4 }}>by {o.local.updatedBy || "you"} · {fmtDate(o.local.updatedAt?.slice(0,10) || "")}</div>
+              </div>
+              <div style={{ background: C.surface, padding: 8, borderRadius: 6, border: `1px solid ${C.rule}` }}>
+                <div style={{ fontSize: 10, color: C.red, fontWeight: 600, marginBottom: 4 }}>OVERWRITTEN</div>
+                <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word", color: C.ink }}>{JSON.stringify(stripMeta(o.remote), null, 2)}</pre>
+                <div style={{ fontSize: 10, color: C.inkFaint, marginTop: 4 }}>by {o.remote.updatedBy || "—"} · {fmtDate(o.remote.updatedAt?.slice(0,10) || "")}</div>
+              </div>
+            </div>
+            <div style={{ marginTop: 8, textAlign: "right" }}>
+              <Btn kind="primary" onClick={() => onRestore(i)}>Restore their version</Btn>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <Btn kind="ghost" onClick={onClearAll}>Dismiss all</Btn>
+        <Btn kind="primary" onClick={onClose}>Done</Btn>
+      </div>
+    </Modal>
+  );
+}
+function stripMeta(r) {
+  const { updatedAt, updatedBy, createdAt, ...rest } = r || {};
+  return rest;
+}
+
+/* ============================================================
    EditProjectModal
    ============================================================ */
 function EditProjectModal({ project, onSave, onDelete, onClose }) {
@@ -1211,7 +1565,8 @@ function EditProjectModal({ project, onSave, onDelete, onClose }) {
    App
    ============================================================ */
 function App() {
-  const initial = useMemo(loadFromLS, []);
+  // Initial load: from localStorage if present, else seed. Migrate to add updatedAt.
+  const initial = useMemo(() => migrateAll(loadFromLS()), []);
   const [projects, setProjects] = useState(initial.projects);
   const [names, setNames]       = useState(initial.names);
   const [entries, setEntries]   = useState(initial.entries);
@@ -1223,6 +1578,24 @@ function App() {
   const [editingProject, setEditingProject] = useState(null);
   const fileRef = useRef(null);
 
+  // ----- Drive sync state -----
+  const [syncStatus, setSyncStatus] = useState("signed-out"); // synced | pending | syncing | offline | signed-out
+  const [user, setUser] = useState(null); // { email, name } | null
+  const [syncedAt, setSyncedAt] = useState(null);
+  const [overwrites, setOverwrites] = useState([]); // array of { slice, id, local, remote }
+  const [showOverwriteModal, setShowOverwriteModal] = useState(false);
+  const [showSignInBanner, setShowSignInBanner] = useState(() => {
+    try { return localStorage.getItem("buildtrack_signin_dismissed") !== "1"; } catch (_) { return true; }
+  });
+  const driveFileId = useRef(null);
+  const lastPulledAt = useRef("");
+  const lastModifiedTime = useRef("");
+  const pushTimer = useRef(null);
+  const pendingPush = useRef(false);   // a push is queued
+  const inFlight = useRef(false);      // currently pushing
+  const stateRef = useRef({ projects, names, entries, pending }); // for sync to read latest
+  useEffect(() => { stateRef.current = { projects, names, entries, pending }; }, [projects, names, entries, pending]);
+
   // Persist on every change
   useEffect(() => {
     saveAll({ projects, names, entries, pending });
@@ -1230,40 +1603,57 @@ function App() {
 
   const showToast = (msg, kind = "info") => setToast({ msg, kind });
 
-  // Mutators
-  const addEntry  = (e) => setEntries(list => [...list, e]);
-  const addName   = (n) => setNames(list => [...list, n]);
+  // Mark a record with updatedAt/updatedBy before storing.
+  const userEmail = user?.email || "";
+  const _stamp = (rec) => stamp(rec, userEmail);
+
+  // Schedule a debounced push to Drive (called by every mutator)
+  const schedulePush = () => {
+    if (!_accessToken || !driveFileId.current) return; // signed-out or not initialized
+    setSyncStatus("pending");
+    pendingPush.current = true;
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(() => { doPush(); }, 3000);
+  };
+
+  // Mutators — all stamp + schedule push
+  const addEntry  = (e) => { setEntries(list => [...list, _stamp(e)]); schedulePush(); };
+  const addName   = (n) => { setNames(list => [...list, _stamp(n)]); schedulePush(); };
   const deleteName = (id) => {
     setNames(list => list.filter(n => n.id !== id));
     setEntries(list => list.filter(e => e.nameId !== id));
     setPending(list => list.filter(p => p.nameId !== id));
+    schedulePush();
     showToast("Name deleted", "info");
   };
-  const addPending = (p) => setPending(list => [...list, p]);
+  const addPending = (p) => { setPending(list => [...list, _stamp(p)]); schedulePush(); };
   const clearPending = (id, clearedAmt, clearedOn) => {
     const target = pending.find(p => p.id === id);
     if (!target) return;
-    setPending(list => list.map(p => p.id === id ? { ...p, status: "cleared", clearedOn, clearedAmt } : p));
-    const entry = {
+    setPending(list => list.map(p => p.id === id ? _stamp({ ...p, status: "cleared", clearedOn, clearedAmt }) : p));
+    const entry = _stamp({
       id: uid(), pid: target.pid, nameId: target.nameId, date: clearedOn,
       desc: `${target.desc || "Pending"} (cleared pending)`,
       amt: clearedAmt, type: "debit",
-    };
+    });
     setEntries(list => [...list, entry]);
+    schedulePush();
     showToast("Pending cleared, ledger entry added ✓", "success");
   };
 
   const addProject = () => {
     const nm = window.prompt("New project name:");
     if (!nm || !nm.trim()) return;
-    const p = { id: uid(), name: nm.trim() };
+    const p = _stamp({ id: uid(), name: nm.trim() });
     setProjects(list => [...list, p]);
     setActivePid(p.id);
     setTab("ledger");
+    schedulePush();
   };
 
   const saveProject = (updated) => {
-    setProjects(list => list.map(p => p.id === updated.id ? updated : p));
+    setProjects(list => list.map(p => p.id === updated.id ? _stamp(updated) : p));
+    schedulePush();
     showToast("Project updated ✓", "success");
   };
 
@@ -1281,7 +1671,7 @@ function App() {
     setNames(list => list.filter(n => n.pid !== id));
     const remaining = projects.filter(p => p.id !== id);
     if (remaining.length === 0) {
-      const fresh = { id: uid(), name: "New Project" };
+      const fresh = _stamp({ id: uid(), name: "New Project" });
       setProjects([fresh]);
       setActivePid(fresh.id);
     } else {
@@ -1289,8 +1679,172 @@ function App() {
       if (activePid === id) setActivePid(remaining[0].id);
     }
     setEditingProject(null);
+    schedulePush();
     showToast("Project deleted", "info");
   };
+
+  /* ---- Drive sync: actual operations ---- */
+  const doPush = async () => {
+    if (!_accessToken || !driveFileId.current) return;
+    if (inFlight.current) return;        // another push in flight; the pending flag handles retry
+    inFlight.current = true;
+    setSyncStatus("syncing");
+    try {
+      const payload = {
+        schemaVersion: SCHEMA_VERSION,
+        syncedAt: new Date().toISOString(),
+        ...stateRef.current,
+      };
+      const meta = await driveUpdateDataFile(driveFileId.current, payload);
+      lastModifiedTime.current = meta.modifiedTime;
+      lastPulledAt.current = meta.modifiedTime;
+      pendingPush.current = false;
+      setSyncedAt(new Date());
+      setSyncStatus("synced");
+    } catch (e) {
+      console.warn("Drive push failed:", e.message);
+      setSyncStatus("offline");
+      // Retry every 30s
+      setTimeout(() => { if (pendingPush.current) doPush(); }, 30000);
+    } finally {
+      inFlight.current = false;
+    }
+  };
+
+  const doPull = async () => {
+    if (!_accessToken || !driveFileId.current) return;
+    try {
+      // HEAD check first to skip no-op pulls
+      const mt = await driveHeadModifiedTime(driveFileId.current);
+      if (mt && mt <= lastModifiedTime.current) return;
+      const remote = await driveReadDataFile(driveFileId.current);
+      const local = stateRef.current;
+      const lastPull = lastPulledAt.current || "";
+      const { state: merged, overwrites: ow } = mergeAll(local, remote, lastPull, _userEmail);
+      // Apply merge
+      setProjects(merged.projects);
+      setNames(merged.names);
+      setEntries(merged.entries);
+      setPending(merged.pending);
+      lastModifiedTime.current = mt;
+      lastPulledAt.current = mt;
+      if (ow.length > 0) {
+        setOverwrites(prev => [...prev, ...ow]);
+      }
+      setSyncedAt(new Date());
+      setSyncStatus("synced");
+    } catch (e) {
+      console.warn("Drive pull failed:", e.message);
+      setSyncStatus("offline");
+    }
+  };
+
+  const initDriveAfterAuth = async () => {
+    // First time we know who we are. Find or create folder + file.
+    try {
+      setSyncStatus("syncing");
+      const folderId = await driveFindOrCreateFolder();
+      let file = await driveFindDataFile(folderId);
+      if (!file) {
+        // First sign-in on this account — push local state to create file
+        const payload = {
+          schemaVersion: SCHEMA_VERSION,
+          syncedAt: new Date().toISOString(),
+          ...stateRef.current,
+        };
+        const created = await driveCreateDataFile(folderId, payload);
+        driveFileId.current = created.id;
+        lastModifiedTime.current = created.modifiedTime;
+        lastPulledAt.current = created.modifiedTime;
+        setSyncedAt(new Date());
+        setSyncStatus("synced");
+        showToast("Drive sync started ✓", "success");
+      } else {
+        driveFileId.current = file.id;
+        // Pull the remote state and merge with local
+        const remote = await driveReadDataFile(file.id);
+        const local = stateRef.current;
+        // First-pull merge: trust the union, last-write-wins per record.
+        // We pass lastPulledAt="" so no overwrite warnings fire on initial merge.
+        const { state: merged } = mergeAll(local, remote, "", _userEmail);
+        setProjects(merged.projects);
+        setNames(merged.names);
+        setEntries(merged.entries);
+        setPending(merged.pending);
+        lastModifiedTime.current = file.modifiedTime;
+        lastPulledAt.current = file.modifiedTime;
+        setSyncedAt(new Date());
+        setSyncStatus("synced");
+        // If local had un-pushed changes, schedule a push so Drive gets them
+        const localCount = local.projects.length + local.names.length + local.entries.length + local.pending.length;
+        const remoteCount = (remote.projects || []).length + (remote.names || []).length + (remote.entries || []).length + (remote.pending || []).length;
+        if (localCount > remoteCount) schedulePush();
+        showToast("Drive sync started ✓", "success");
+      }
+    } catch (e) {
+      console.error("Drive init failed:", e);
+      setSyncStatus("offline");
+      showToast("Sync failed: " + e.message, "error");
+    }
+  };
+
+  const signIn = async () => {
+    try {
+      const { email, name } = await requestAccessToken({ prompt: "consent" });
+      setUser({ email, name });
+      setShowSignInBanner(false);
+      try { localStorage.setItem("buildtrack_signin_dismissed", "1"); } catch (_) {}
+      await initDriveAfterAuth();
+    } catch (e) {
+      console.error("Sign-in failed:", e);
+      showToast("Sign-in cancelled or failed", "error");
+    }
+  };
+
+  const signOut = () => {
+    if (!window.confirm("Sign out of Google? Your local data stays on this device but won't sync.")) return;
+    signOutAccount();
+    setUser(null);
+    setSyncStatus("signed-out");
+    driveFileId.current = null;
+    lastModifiedTime.current = "";
+    lastPulledAt.current = "";
+    showToast("Signed out", "info");
+  };
+
+  const forcePull = async () => { await doPull(); };
+  const forcePush = async () => { pendingPush.current = true; await doPush(); };
+
+  // Attempt silent refresh on mount — if the user has a fresh grant cookie,
+  // this gets us a token without UI.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await silentRefresh();
+        if (!cancelled && result) {
+          setUser({ email: result.email, name: result.name });
+          setShowSignInBanner(false);
+          await initDriveAfterAuth();
+        }
+      } catch (_) {
+        // not signed in or first visit; that's fine
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Pull on tab focus + every 60s
+  useEffect(() => {
+    if (syncStatus === "signed-out") return;
+    const onVisible = () => { if (document.visibilityState === "visible") doPull(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const iv = setInterval(() => doPull(), 60000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(iv);
+    };
+  }, [syncStatus]);
 
   /* ---- Excel export ---- */
   const exportExcel = (scope = activePid) => {
@@ -1384,10 +1938,13 @@ function App() {
           clearedOn: String(r.ClearedOn || ""), clearedAmt: Number(r.ClearedAmount) || 0,
         }) : null);
 
-        setProjects(newProjects);
-        setNames(newNames);
-        setEntries(newEntries);
-        setPending(newPending);
+        // Stamp imported records with updatedAt if they don't have one (older exports)
+        const stampImport = arr => arr.map(r => r.updatedAt ? r : { ...r, updatedAt: new Date().toISOString(), updatedBy: userEmail });
+        setProjects(stampImport(newProjects));
+        setNames(stampImport(newNames));
+        setEntries(stampImport(newEntries));
+        setPending(stampImport(newPending));
+        schedulePush();
         showToast(`Imported ${ledRows.length} entries, ${pendRows.length} pending ✓`, "success");
       } catch (err) {
         console.error(err);
@@ -1443,7 +2000,7 @@ function App() {
 
   const doDelete = (scope) => {
     if (scope === "all") {
-      const fresh = { id: uid(), name: "New Project" };
+      const fresh = _stamp({ id: uid(), name: "New Project" });
       setProjects([fresh]);
       setNames([]); setEntries([]); setPending([]);
       setActivePid(fresh.id);
@@ -1453,7 +2010,7 @@ function App() {
       setEntries(list => list.filter(e => e.pid !== activePid));
       setPending(list => list.filter(p => p.pid !== activePid));
       if (remaining.length === 0) {
-        const fresh = { id: uid(), name: "New Project" };
+        const fresh = _stamp({ id: uid(), name: "New Project" });
         setProjects([fresh]);
         setActivePid(fresh.id);
       } else {
@@ -1463,6 +2020,7 @@ function App() {
     }
     setShowClear(false);
     setTab("ledger");
+    schedulePush();
     showToast("Backup saved — data cleared ✓", "success");
   };
 
@@ -1478,7 +2036,13 @@ function App() {
             <span style={{ fontSize: 18, fontWeight: 700, color: C.amber }}>BuildTrack</span>
             <span style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 2 }}>Field Ledger</span>
           </div>
-          <div className="bt-toolbar" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <div className="bt-toolbar" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <SyncPill
+              status={syncStatus} syncedAt={syncedAt} user={user}
+              onSignIn={signIn} onSignOut={signOut}
+              onForcePull={forcePull} onForcePush={forcePush}
+            />
+            <div style={{ width: 1, background: C.rule, margin: "0 2px" }}/>
             <Btn kind="ghost" onClick={saveExcel} title="Save Excel">
               <span>⬇</span><span className="bt-label-long">&nbsp;Save Excel</span>
             </Btn>
@@ -1495,6 +2059,44 @@ function App() {
             </Btn>
           </div>
         </div>
+
+        {/* Sign-in banner */}
+        {!user && showSignInBanner && (
+          <div style={{
+            background: C.blueBg, border: `1px solid #BFDBFE`, borderRadius: 8,
+            padding: "10px 12px", marginBottom: 12,
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, color: C.ink }}>
+              <b style={{ color: C.blue }}>☁ Sync across devices</b> — Sign in to Google to back up to your own Drive.
+              Your data stays in your account; the app never sees it.
+            </div>
+            <Btn kind="primary" onClick={signIn}>Sign in with Google</Btn>
+            <button
+              onClick={() => { setShowSignInBanner(false); try { localStorage.setItem("buildtrack_signin_dismissed", "1"); } catch (_) {} }}
+              style={{ background: "transparent", border: "none", color: C.inkFaint, fontSize: 18, cursor: "pointer", padding: 4, lineHeight: 1 }}
+              title="Dismiss">×</button>
+          </div>
+        )}
+
+        {/* Conflict / overwrite warning banner */}
+        {overwrites.length > 0 && (
+          <div style={{
+            background: "#FEF3C7", border: `1px solid ${C.amberBorder}`, borderRadius: 8,
+            padding: "10px 12px", marginBottom: 12,
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, color: C.ink }}>
+              <b style={{ color: C.amber }}>⚠ Your edits overwrote {overwrites.length} change{overwrites.length === 1 ? "" : "s"}</b>
+              {" "}from {overwrites[0].remote.updatedBy || "another user"}{overwrites.length > 1 ? " and others" : ""}.
+            </div>
+            <Btn kind="ghost" onClick={() => setShowOverwriteModal(true)}>View →</Btn>
+            <button
+              onClick={() => setOverwrites([])}
+              style={{ background: "transparent", border: "none", color: C.inkFaint, fontSize: 18, cursor: "pointer", padding: 4, lineHeight: 1 }}
+              title="Dismiss">×</button>
+          </div>
+        )}
         <ProjectChips
           projects={projects} activePid={activePid}
           onSelect={(id) => { setActivePid(id); setTab("ledger"); }}
@@ -1552,6 +2154,26 @@ function App() {
           onSave={saveProject}
           onDelete={deleteProjectFromEdit}
           onClose={() => setEditingProject(null)}
+        />
+      )}
+
+      {showOverwriteModal && (
+        <OverwriteModal
+          overwrites={overwrites}
+          onClose={() => setShowOverwriteModal(false)}
+          onRestore={(idx) => {
+            const o = overwrites[idx];
+            if (!o) return;
+            // Apply remote version on top of local for this record
+            const setter = { projects: setProjects, names: setNames, entries: setEntries, pending: setPending }[o.slice];
+            if (setter) {
+              setter(list => list.map(r => r.id === o.id ? o.remote : r));
+              schedulePush();
+              showToast("Restored their version", "success");
+            }
+            setOverwrites(prev => prev.filter((_, i) => i !== idx));
+          }}
+          onClearAll={() => { setOverwrites([]); setShowOverwriteModal(false); }}
         />
       )}
 
