@@ -203,7 +203,28 @@ const LS = {
   names: "buildtrack_names",
   entries: "buildtrack_entries",
   pending: "buildtrack_pending",
+  signedIn: "buildtrack_signed_in",      // "1" if user is signed in (any tab can read this)
+  signedInEmail: "buildtrack_user_email", // remembered email for cross-tab display
 };
+
+// Cross-tab sign-in marker helpers. We persist ONLY the email + a flag, never the token.
+function markSignedIn(email) {
+  try {
+    localStorage.setItem(LS.signedIn, "1");
+    if (email) localStorage.setItem(LS.signedInEmail, email);
+  } catch (_) {}
+}
+function markSignedOut() {
+  try {
+    localStorage.removeItem(LS.signedIn);
+    localStorage.removeItem(LS.signedInEmail);
+  } catch (_) {}
+}
+function readSignedInHint() {
+  try {
+    return localStorage.getItem(LS.signedIn) === "1" ? localStorage.getItem(LS.signedInEmail) || "" : "";
+  } catch (_) { return ""; }
+}
 const loadFromLS = () => {
   try {
     const p = JSON.parse(localStorage.getItem(LS.projects) || "null");
@@ -239,6 +260,29 @@ const stamp = (rec, userEmail) => ({
   updatedAt: new Date().toISOString(),
   updatedBy: userEmail || rec.updatedBy || "",
 });
+
+// Stamp + mark archived. Used by archive flow.
+const stampArchive = (rec, userEmail, when = new Date().toISOString()) => ({
+  ...rec,
+  archived: true,
+  archivedAt: when,
+  archivedBy: userEmail || "",
+  updatedAt: when,
+  updatedBy: userEmail || rec.updatedBy || "",
+});
+
+// Stamp + clear archive. Used by restore.
+const stampRestore = (rec, userEmail) => ({
+  ...rec,
+  archived: false,
+  archivedAt: "",
+  archivedBy: "",
+  updatedAt: new Date().toISOString(),
+  updatedBy: userEmail || rec.updatedBy || "",
+});
+
+// Filter helper: returns only non-archived records.
+const live = (arr) => (arr || []).filter(r => !r.archived);
 
 // Backfill: any record without updatedAt gets one based on createdAt.
 const migrateRecord = (r) => r.updatedAt ? r : { ...r, updatedAt: r.createdAt || new Date(0).toISOString(), updatedBy: r.updatedBy || "" };
@@ -309,10 +353,11 @@ async function requestAccessToken({ prompt = "" } = {}) {
 }
 
 async function silentRefresh() {
-  // GIS supports silent token refresh by calling requestAccessToken with prompt=''.
-  // If the user previously granted consent, this returns a fresh token without UI.
+  // GIS's `prompt: 'none'` returns a token without any UI if the user has previously
+  // granted consent in this browser AND has an active Google session. If either
+  // condition is missing, it rejects fast and we fall through to the Sign in button.
   try {
-    return await requestAccessToken({ prompt: "" });
+    return await requestAccessToken({ prompt: "none" });
   } catch (e) {
     return null;
   }
@@ -628,12 +673,13 @@ function ProjectChips({ projects, activePid, onSelect, onNew }) {
   );
 }
 
-function TabBar({ tab, setTab, pendingCount }) {
+function TabBar({ tab, setTab, pendingCount, archiveCount }) {
   const tabs = [
     { k: "ledger",  l: "Ledger" },
     { k: "pending", l: `Pending${pendingCount ? ` (${pendingCount})` : ""}` },
     { k: "summary", l: "Summary" },
     { k: "names",   l: "Names"  },
+    { k: "archive", l: `Archive${archiveCount ? ` (${archiveCount})` : ""}` },
   ];
   return (
     <div style={{ display: "flex", borderBottom: `1px solid ${C.rule}`, overflowX: "auto" }}>
@@ -661,8 +707,8 @@ function LedgerView({ pid, names, entries, addEntry, addName }) {
   const [type, setType] = useState("debit");
   const [openRow, setOpenRow] = useState(null); // entry id being added against
 
-  const projectNames = names.filter(n => n.pid === pid);
-  const projectEntries = entries.filter(e => e.pid === pid);
+  const projectNames = names.filter(n => n.pid === pid && !n.archived);
+  const projectEntries = entries.filter(e => e.pid === pid && !e.archived);
 
   // Auto-select first name when project changes / names list changes
   useEffect(() => {
@@ -870,8 +916,8 @@ function PendingView({ pid, names, pending, addPending, clearPending, addName })
   const [dueDate, setDueDate] = useState("");
   const [openClear, setOpenClear] = useState(null);
 
-  const projectNames = names.filter(n => n.pid === pid);
-  const projPending = pending.filter(p => p.pid === pid);
+  const projectNames = names.filter(n => n.pid === pid && !n.archived);
+  const projPending = pending.filter(p => p.pid === pid && !p.archived);
   const open = projPending.filter(p => p.status === "pending");
   const cleared = projPending.filter(p => p.status === "cleared");
   const totalPending = open.reduce((s, p) => s + Number(p.amt || 0), 0);
@@ -1040,9 +1086,9 @@ function SummaryView({ pid, names, entries, pending }) {
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState(null);
 
-  const projectNames = names.filter(n => n.pid === pid);
-  const projectEntries = entries.filter(e => e.pid === pid);
-  const projectPending = pending.filter(p => p.pid === pid && p.status === "pending");
+  const projectNames = names.filter(n => n.pid === pid && !n.archived);
+  const projectEntries = entries.filter(e => e.pid === pid && !e.archived);
+  const projectPending = pending.filter(p => p.pid === pid && p.status === "pending" && !p.archived);
 
   const rows = useMemo(() => {
     const list = projectNames.map(n => {
@@ -1148,9 +1194,9 @@ function SummaryView({ pid, names, entries, pending }) {
 /* ============================================================
    NamesView
    ============================================================ */
-function NamesView({ pid, names, entries, pending, addName, deleteName, toast }) {
+function NamesView({ pid, names, entries, pending, addName, archiveName, toast }) {
   const [val, setVal] = useState("");
-  const projectNames = names.filter(n => n.pid === pid);
+  const projectNames = names.filter(n => n.pid === pid && !n.archived);
 
   const add = () => {
     const label = val.trim();
@@ -1205,14 +1251,14 @@ function NamesView({ pid, names, entries, pending, addName, deleteName, toast })
                 )}
                 <button
                   onClick={() => {
-                    if (ents.length === 0) { deleteName(n.id); return; }
-                    if (window.confirm(`Delete "${n.label}"? It has ${ents.length} entries.`)) deleteName(n.id);
+                    if (ents.length === 0) { archiveName(n.id); return; }
+                    if (window.confirm(`Archive "${n.label}"? It has ${ents.length} entries. You can restore it from the Archive tab.`)) archiveName(n.id);
                   }}
-                  title="Delete name"
+                  title="Archive name"
                   style={{
                     background: "transparent", border: "none", color: C.inkFaint,
-                    fontSize: 18, cursor: "pointer", padding: 6, lineHeight: 1,
-                  }}>×</button>
+                    fontSize: 16, cursor: "pointer", padding: 6, lineHeight: 1,
+                  }}>📦</button>
               </div>
             );
           })}
@@ -1223,128 +1269,112 @@ function NamesView({ pid, names, entries, pending, addName, deleteName, toast })
 }
 
 /* ============================================================
-   ClearModal — 3-step backup-then-delete flow
+   ArchiveView — see all archived records, restore individually
    ============================================================ */
-function ClearModal({ state, activePid, onClose, onDelete, downloadExcel, toast }) {
-  const [scope, setScope] = useState("project");
-  const [dlState, setDlState] = useState("idle"); // idle | awaiting | confirmed
-  const [filename, setFilename] = useState("");
+function ArchiveView({ projects, names, entries, pending, onRestore }) {
+  const archivedProjects = projects.filter(p => p.archived).sort((a,b) => (b.archivedAt||"").localeCompare(a.archivedAt||""));
+  const archivedNames    = names.filter(n => n.archived).sort((a,b) => (b.archivedAt||"").localeCompare(a.archivedAt||""));
+  const archivedEntries  = entries.filter(e => e.archived).sort((a,b) => (b.archivedAt||"").localeCompare(a.archivedAt||""));
+  const archivedPending  = pending.filter(p => p.archived).sort((a,b) => (b.archivedAt||"").localeCompare(a.archivedAt||""));
 
-  // Reset DL state whenever the scope changes
-  useEffect(() => { setDlState("idle"); setFilename(""); }, [scope]);
+  const projectName = id => projects.find(p => p.id === id)?.name || "—";
+  const nameLabel = id => names.find(n => n.id === id)?.label || "—";
 
-  const activeProject = state.projects.find(p => p.id === activePid);
-  const projEntries = state.entries.filter(e => e.pid === activePid);
-  const projPending = state.pending.filter(p => p.pid === activePid);
-  const projNames = state.names.filter(n => n.pid === activePid);
+  const totalCount = archivedProjects.length + archivedNames.length + archivedEntries.length + archivedPending.length;
 
-  const triggerDownload = () => {
-    const fn = downloadExcel(scope === "all" ? "ALL" : activePid);
-    setFilename(fn);
-    setDlState("awaiting");
-  };
-
-  const stepBubble = (n, label, done) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-      <div style={{
-        width: 22, height: 22, borderRadius: "50%",
-        background: done ? C.green : C.rule,
-        color: done ? "#fff" : C.inkMid,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 11, fontWeight: 700,
-      }}>{done ? "✓" : n}</div>
-      <span style={{ color: done ? C.green : C.inkMid, fontWeight: done ? 600 : 400 }}>{label}</span>
-    </div>
-  );
-
-  return (
-    <Modal title="Clear data" onClose={onClose}>
-      {/* Progress indicator */}
-      <div style={{ display: "flex", gap: 14, marginBottom: 18, alignItems: "center", flexWrap: "wrap" }}>
-        {stepBubble(1, "Choose scope", true)}
-        <div style={{ flex: 1, height: 1, background: C.rule, minWidth: 20 }}/>
-        {stepBubble(2, "Download backup", dlState === "confirmed")}
-        <div style={{ flex: 1, height: 1, background: C.rule, minWidth: 20 }}/>
-        {stepBubble(3, "Delete data", false)}
+  if (totalCount === 0) {
+    return (
+      <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10, padding: 32, textAlign: "center", color: C.inkFaint }}>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>📦</div>
+        <div style={{ fontWeight: 600, color: C.ink, marginBottom: 4 }}>Archive is empty</div>
+        <div style={{ fontSize: 13 }}>Archived items will appear here so nothing is ever lost.</div>
       </div>
+    );
+  }
 
-      {/* Step 1: scope */}
-      <div style={{ marginBottom: 18 }}>
-        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>1. Choose scope</div>
-        <label style={{ display: "block", padding: 10, border: `1px solid ${scope === "project" ? C.amber : C.rule}`, borderRadius: 8, cursor: "pointer", background: scope === "project" ? C.amberBg : C.surface, marginBottom: 8 }}>
-          <input type="radio" checked={scope === "project"} onChange={() => setScope("project")} style={{ marginRight: 8 }}/>
-          <b>Current project only — {activeProject?.name}</b>
-          <div style={{ fontSize: 12, color: C.inkMid, marginTop: 4, paddingLeft: 24 }}>
-            {projEntries.length} entries · {projPending.length} pending · {projNames.length} names
-          </div>
-        </label>
-        <label style={{ display: "block", padding: 10, border: `1px solid ${scope === "all" ? C.red : C.rule}`, borderRadius: 8, cursor: "pointer", background: scope === "all" ? C.redBg : C.surface }}>
-          <input type="radio" checked={scope === "all"} onChange={() => setScope("all")} style={{ marginRight: 8 }}/>
-          <b style={{ color: scope === "all" ? C.red : C.ink }}>Everything — all projects</b>
-          <div style={{ fontSize: 12, color: C.inkMid, marginTop: 4, paddingLeft: 24 }}>
-            {state.projects.length} projects · {state.entries.length} entries · {state.pending.length} pending
-          </div>
-        </label>
-      </div>
-
-      {/* Step 2: backup */}
-      <div style={{ marginBottom: 18 }}>
-        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>2. Download backup (required)</div>
-        {dlState === "idle" && (
-          <div style={{ background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 8, padding: 12 }}>
-            <div style={{ fontSize: 13, color: C.amber, fontWeight: 600, marginBottom: 8 }}>Download backup first — required</div>
-            <div style={{ fontSize: 12, color: C.inkMid, marginBottom: 10 }}>
-              Saves an Excel file you can restore from later via Load Excel.
-            </div>
-            <Btn kind="primary" onClick={triggerDownload}>⬇ Download now</Btn>
-          </div>
-        )}
-        {dlState === "awaiting" && (
-          <div style={{ background: C.blueBg, border: `1px solid #BFDBFE`, borderRadius: 8, padding: 12 }}>
-            <div style={{ fontSize: 13, color: C.blue, fontWeight: 600, marginBottom: 6 }}>Did you click "Download file" in the dialog?</div>
-            <div style={{ fontFamily: "ui-monospace, SF Mono, monospace", fontSize: 12, color: C.inkMid, background: "#fff", padding: "6px 8px", borderRadius: 6, marginBottom: 10, wordBreak: "break-all" }}>{filename}</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Btn kind="success" onClick={() => setDlState("confirmed")}>✓ Yes, file is saved</Btn>
-              <Btn kind="ghost" onClick={triggerDownload}>↩ No — try again</Btn>
-            </div>
-          </div>
-        )}
-        {dlState === "confirmed" && (
-          <div style={{ background: C.greenBg, border: `1px solid ${C.greenLight}`, borderRadius: 8, padding: 12 }}>
-            <div style={{ fontSize: 13, color: C.green, fontWeight: 600 }}>✓ Backup confirmed</div>
-            <div style={{ fontFamily: "ui-monospace, SF Mono, monospace", fontSize: 12, color: C.inkMid, marginTop: 4, wordBreak: "break-all" }}>{filename}</div>
-            <button onClick={triggerDownload} style={{ background: "transparent", border: "none", color: C.blue, cursor: "pointer", padding: 0, marginTop: 6, fontSize: 12, textDecoration: "underline" }}>Re-download</button>
-          </div>
-        )}
-      </div>
-
-      {/* Step 3: delete */}
-      <div>
-        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>3. Delete data</div>
-        <div style={{ position: "relative" }}>
-          {dlState !== "confirmed" && (
-            <div style={{
-              position: "absolute", top: -28, left: 0, right: 0, textAlign: "center",
-              fontSize: 11, color: C.inkFaint,
+  const Section = ({ title, items, render }) => {
+    if (items.length === 0) return null;
+    return (
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+          {title} ({items.length})
+        </div>
+        <div style={{ background: C.surface, border: `1px solid ${C.rule}`, borderRadius: 10 }}>
+          {items.map((it, i) => (
+            <div key={it.id} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: 12,
+              borderBottom: i < items.length - 1 ? `1px solid ${C.rule}` : "none",
             }}>
-              {dlState === "idle" ? "Download backup first ↑" : "Confirm download above ↑"}
+              <div style={{ flex: 1, minWidth: 0 }}>{render(it)}</div>
+              <Btn kind="ghost" onClick={() => onRestore(items === archivedProjects ? "projects" : items === archivedNames ? "names" : items === archivedEntries ? "entries" : "pending", it.id)}>
+                ↩ Restore
+              </Btn>
             </div>
-          )}
-          <Btn
-            kind="danger"
-            disabled={dlState !== "confirmed"}
-            onClick={() => onDelete(scope)}
-            style={{
-              width: "100%", height: 48, fontSize: 15, fontWeight: 600,
-              opacity: dlState === "confirmed" ? 1 : 0.38,
-              pointerEvents: dlState === "confirmed" ? "auto" : "none",
-              cursor: dlState === "confirmed" ? "pointer" : "not-allowed",
-              color: "#fff", background: C.red, borderColor: C.red,
-            }}
-          >🗑 Delete data</Btn>
+          ))}
         </div>
       </div>
-    </Modal>
+    );
+  };
+
+  return (
+    <div>
+      <div style={{ background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 8, padding: "10px 12px", marginBottom: 16, fontSize: 13, color: C.ink }}>
+        <b style={{ color: C.amber }}>📦 Archive</b> — Nothing here is ever deleted. Tap <b>Restore</b> to bring an item back to the active views.
+      </div>
+
+      <Section title="Projects" items={archivedProjects} render={p => (
+        <>
+          <div style={{ fontWeight: 600 }}>{p.name}</div>
+          <div style={{ fontSize: 12, color: C.inkFaint }}>
+            Archived {fmtDate(p.archivedAt?.slice(0,10))}{p.archivedBy ? ` · by ${p.archivedBy}` : ""}
+            {p.location ? ` · ${p.location}` : ""}
+          </div>
+        </>
+      )}/>
+
+      <Section title="Names" items={archivedNames} render={n => (
+        <>
+          <div style={{ fontWeight: 600 }}>{n.label}</div>
+          <div style={{ fontSize: 12, color: C.inkFaint }}>
+            Project: {projectName(n.pid)} · Archived {fmtDate(n.archivedAt?.slice(0,10))}{n.archivedBy ? ` · by ${n.archivedBy}` : ""}
+          </div>
+        </>
+      )}/>
+
+      <Section title="Entries" items={archivedEntries} render={e => (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 600 }}>{nameLabel(e.nameId)}</span>
+            <span style={{ color: e.type === "debit" ? C.red : C.green, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+              {e.type === "debit" ? "−" : "+"}{fmtINR(e.amt)}
+            </span>
+            <span style={{ fontSize: 12, color: C.inkMid }}>· {e.desc || "—"}</span>
+          </div>
+          <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 2 }}>
+            {fmtDate(e.date)} · Project: {projectName(e.pid)} · Archived {fmtDate(e.archivedAt?.slice(0,10))}{e.archivedBy ? ` · by ${e.archivedBy}` : ""}
+          </div>
+        </>
+      )}/>
+
+      <Section title="Pending" items={archivedPending} render={p => (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 600 }}>{nameLabel(p.nameId)}</span>
+            <span style={{ color: C.orange, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmtINR(p.amt)}</span>
+            <span style={{ fontSize: 12, color: C.inkMid }}>· {p.desc || "—"}</span>
+            <span style={{
+              fontSize: 10, fontWeight: 600,
+              color: p.status === "cleared" ? C.green : C.orange,
+              background: p.status === "cleared" ? C.greenBg : C.orangeBg,
+              padding: "1px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: 1,
+            }}>{p.status}</span>
+          </div>
+          <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 2 }}>
+            Project: {projectName(p.pid)}{p.dueDate ? ` · Due ${fmtDate(p.dueDate)}` : ""} · Archived {fmtDate(p.archivedAt?.slice(0,10))}{p.archivedBy ? ` · by ${p.archivedBy}` : ""}
+          </div>
+        </>
+      )}/>
+    </div>
   );
 }
 
@@ -1480,7 +1510,7 @@ function stripMeta(r) {
 /* ============================================================
    EditProjectModal
    ============================================================ */
-function EditProjectModal({ project, onSave, onDelete, onClose }) {
+function EditProjectModal({ project, onSave, onArchive, onClose }) {
   const [name, setName] = useState(project.name || "");
   const [location, setLocation] = useState(project.location || "");
   const [startDate, setStartDate] = useState(project.startDate || "");
@@ -1550,7 +1580,7 @@ function EditProjectModal({ project, onSave, onDelete, onClose }) {
           display: "flex", justifyContent: "space-between", gap: 8, marginTop: 8,
           paddingTop: 12, borderTop: `1px solid ${C.rule}`, flexWrap: "wrap",
         }} className="bt-grid">
-          <Btn kind="danger" onClick={() => onDelete(project.id)}>🗑 Delete project</Btn>
+          <Btn kind="ghost" onClick={() => onArchive(project.id)} style={{ color: C.amber, borderColor: C.amberBorder }}>📦 Archive project</Btn>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Btn kind="ghost" onClick={onClose}>Cancel</Btn>
             <Btn kind="primary" onClick={save}>Save</Btn>
@@ -1574,7 +1604,6 @@ function App() {
   const [activePid, setActivePid] = useState(initial.projects[0]?.id || "");
   const [tab, setTab] = useState("ledger");
   const [toast, setToast] = useState({ msg: "", kind: "" });
-  const [showClear, setShowClear] = useState(false);
   const [editingProject, setEditingProject] = useState(null);
   const fileRef = useRef(null);
 
@@ -1619,14 +1648,46 @@ function App() {
   // Mutators — all stamp + schedule push
   const addEntry  = (e) => { setEntries(list => [...list, _stamp(e)]); schedulePush(); };
   const addName   = (n) => { setNames(list => [...list, _stamp(n)]); schedulePush(); };
-  const deleteName = (id) => {
-    setNames(list => list.filter(n => n.id !== id));
-    setEntries(list => list.filter(e => e.nameId !== id));
-    setPending(list => list.filter(p => p.nameId !== id));
-    schedulePush();
-    showToast("Name deleted", "info");
-  };
   const addPending = (p) => { setPending(list => [...list, _stamp(p)]); schedulePush(); };
+
+  // Archive / restore — soft-delete by setting archived: true.
+  // No record is ever truly removed; the Archive tab shows everything and offers Restore.
+  const archiveRecord = (slice, id) => {
+    const setter = { projects: setProjects, names: setNames, entries: setEntries, pending: setPending }[slice];
+    if (!setter) return;
+    setter(list => list.map(r => r.id === id ? stampArchive(r, userEmail) : r));
+    schedulePush();
+    showToast("Archived — find it in the Archive tab", "info");
+  };
+
+  // Archiving a Project cascades to all its names, entries, pending.
+  // Restoring a project does NOT cascade — children stay archived so user can selectively restore.
+  const archiveProject = (id) => {
+    const when = new Date().toISOString();
+    setProjects(list => list.map(p => p.id === id ? stampArchive(p, userEmail, when) : p));
+    setNames(list => list.map(n => n.pid === id ? stampArchive(n, userEmail, when) : n));
+    setEntries(list => list.map(e => e.pid === id ? stampArchive(e, userEmail, when) : e));
+    setPending(list => list.map(p => p.pid === id ? stampArchive(p, userEmail, when) : p));
+    // If the archived project was the active one, switch to the first remaining live project (or create one)
+    const remainingLive = projects.filter(p => p.id !== id && !p.archived);
+    if (remainingLive.length === 0) {
+      const fresh = _stamp({ id: uid(), name: "New Project" });
+      setProjects(list => [...list.map(p => p.id === id ? stampArchive(p, userEmail, when) : p), fresh]);
+      setActivePid(fresh.id);
+    } else if (activePid === id) {
+      setActivePid(remainingLive[0].id);
+    }
+    schedulePush();
+    showToast("Project archived (with its entries, names, pending)", "info");
+  };
+
+  const restoreRecord = (slice, id) => {
+    const setter = { projects: setProjects, names: setNames, entries: setEntries, pending: setPending }[slice];
+    if (!setter) return;
+    setter(list => list.map(r => r.id === id ? stampRestore(r, userEmail) : r));
+    schedulePush();
+    showToast("Restored ✓", "success");
+  };
   const clearPending = (id, clearedAmt, clearedOn) => {
     const target = pending.find(p => p.id === id);
     if (!target) return;
@@ -1657,30 +1718,17 @@ function App() {
     showToast("Project updated ✓", "success");
   };
 
-  const deleteProjectFromEdit = (id) => {
+  const archiveProjectFromEdit = (id) => {
     const target = projects.find(p => p.id === id);
     if (!target) return;
-    const ents = entries.filter(e => e.pid === id).length;
-    const pn = pending.filter(p => p.pid === id).length;
+    const ents = entries.filter(e => e.pid === id && !e.archived).length;
+    const pn = pending.filter(p => p.pid === id && !p.archived).length;
     const msg = ents + pn > 0
-      ? `Delete project "${target.name}"? This will also remove ${ents} entries and ${pn} pending records.`
-      : `Delete empty project "${target.name}"?`;
+      ? `Archive project "${target.name}"? Its ${ents} entries and ${pn} pending records will also be archived. You can restore them from the Archive tab.`
+      : `Archive project "${target.name}"? You can restore it from the Archive tab.`;
     if (!window.confirm(msg)) return;
-    setEntries(list => list.filter(e => e.pid !== id));
-    setPending(list => list.filter(p => p.pid !== id));
-    setNames(list => list.filter(n => n.pid !== id));
-    const remaining = projects.filter(p => p.id !== id);
-    if (remaining.length === 0) {
-      const fresh = _stamp({ id: uid(), name: "New Project" });
-      setProjects([fresh]);
-      setActivePid(fresh.id);
-    } else {
-      setProjects(remaining);
-      if (activePid === id) setActivePid(remaining[0].id);
-    }
+    archiveProject(id);
     setEditingProject(null);
-    schedulePush();
-    showToast("Project deleted", "info");
   };
 
   /* ---- Drive sync: actual operations ---- */
@@ -1790,9 +1838,14 @@ function App() {
 
   const signIn = async () => {
     try {
-      const { email, name } = await requestAccessToken({ prompt: "consent" });
+      // First sign-in: pop the consent screen. Subsequent silent refresh uses prompt:'none'.
+      // We pick 'consent' here only on the first ever sign-in so the user explicitly opts in;
+      // after that, the prompt is omitted and the user usually doesn't see any UI.
+      const promptMode = readSignedInHint() ? "" : "consent";
+      const { email, name } = await requestAccessToken({ prompt: promptMode });
       setUser({ email, name });
       setShowSignInBanner(false);
+      markSignedIn(email);
       try { localStorage.setItem("buildtrack_signin_dismissed", "1"); } catch (_) {}
       await initDriveAfterAuth();
     } catch (e) {
@@ -1804,6 +1857,7 @@ function App() {
   const signOut = () => {
     if (!window.confirm("Sign out of Google? Your local data stays on this device but won't sync.")) return;
     signOutAccount();
+    markSignedOut();
     setUser(null);
     setSyncStatus("signed-out");
     driveFileId.current = null;
@@ -1815,24 +1869,58 @@ function App() {
   const forcePull = async () => { await doPull(); };
   const forcePush = async () => { pendingPush.current = true; await doPush(); };
 
-  // Attempt silent refresh on mount — if the user has a fresh grant cookie,
-  // this gets us a token without UI.
+  // Mount: if a sign-in marker exists in localStorage (from a previous tab/session),
+  // attempt silent token refresh. This is what makes "new tab is already signed in" work.
+  // Without the marker, we skip the attempt so first-time users don't see surprise popups.
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const hint = readSignedInHint();
+      if (!hint) return; // never signed in here → don't try silent reauth
       try {
         const result = await silentRefresh();
         if (!cancelled && result) {
           setUser({ email: result.email, name: result.name });
           setShowSignInBanner(false);
+          markSignedIn(result.email);
           await initDriveAfterAuth();
+        } else if (!cancelled) {
+          // Silent reauth failed (cookie expired, consent revoked, etc.) — keep the marker
+          // so the Sign in banner appears with the remembered email, prompting re-sign-in.
+          // Don't clear the marker on transient failures; only clear on explicit sign-out.
         }
       } catch (_) {
-        // not signed in or first visit; that's fine
+        // ignored — user can tap Sign in
       }
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // Cross-tab sync: when one tab signs in/out, others react via the localStorage event.
+  // (The `storage` event fires in OTHER tabs of the same origin when localStorage changes.)
+  useEffect(() => {
+    const onStorage = async (e) => {
+      if (e.key !== LS.signedIn) return;
+      if (e.newValue === "1" && !user) {
+        // Another tab just signed in. Try silent reauth here so this tab catches up.
+        const result = await silentRefresh();
+        if (result) {
+          setUser({ email: result.email, name: result.name });
+          setShowSignInBanner(false);
+          await initDriveAfterAuth();
+        }
+      } else if (e.newValue === null && user) {
+        // Another tab signed out. Mirror it here.
+        signOutAccount();
+        setUser(null);
+        setSyncStatus("signed-out");
+        driveFileId.current = null;
+        showToast("Signed out from another tab", "info");
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [user]);
 
   // Pull on tab focus + every 60s
   useEffect(() => {
@@ -1855,19 +1943,20 @@ function App() {
     const projName = id => projects.find(p => p.id === id)?.name || "";
     const nameLabel = id => names.find(n => n.id === id)?.label || "";
 
+    const archMeta = r => ({ Archived: r.archived ? "yes" : "", ArchivedAt: r.archivedAt || "", ArchivedBy: r.archivedBy || "" });
     const projRows = projList.map(p => ({
       ID: p.id, Name: p.name,
       Location: p.location || "", Status: p.status || "",
       StartDate: p.startDate || "", Budget: p.budget != null ? Number(p.budget) : "",
-      Notes: p.notes || "",
+      Notes: p.notes || "", ...archMeta(p),
     }));
     const nameRows = names.filter(n => projIds.has(n.pid)).map(n => ({
-      ID: n.id, ProjectID: n.pid, Project: projName(n.pid), Name: n.label,
+      ID: n.id, ProjectID: n.pid, Project: projName(n.pid), Name: n.label, ...archMeta(n),
     }));
     const ledgerRows = entries.filter(e => projIds.has(e.pid)).map(e => ({
       ID: e.id, ProjectID: e.pid, Project: projName(e.pid),
       NameID: e.nameId, Name: nameLabel(e.nameId),
-      Date: e.date, Description: e.desc, Amount: Number(e.amt) || 0, Type: e.type,
+      Date: e.date, Description: e.desc, Amount: Number(e.amt) || 0, Type: e.type, ...archMeta(e),
     }));
     const pendRows = pending.filter(p => projIds.has(p.pid)).map(p => ({
       ID: p.id, ProjectID: p.pid, Project: projName(p.pid),
@@ -1875,12 +1964,13 @@ function App() {
       Description: p.desc, Amount: Number(p.amt) || 0,
       DueDate: p.dueDate, Status: p.status, CreatedAt: p.createdAt,
       ClearedOn: p.clearedOn || "", ClearedAmount: Number(p.clearedAmt) || 0,
+      ...archMeta(p),
     }));
 
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(projRows,   { header: ["ID","Name","Location","Status","StartDate","Budget","Notes"] }), "Projects");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(nameRows,   { header: ["ID","ProjectID","Project","Name"] }), "Names");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ledgerRows, { header: ["ID","ProjectID","Project","NameID","Name","Date","Description","Amount","Type"] }), "Ledger");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pendRows,   { header: ["ID","ProjectID","Project","NameID","Name","Description","Amount","DueDate","Status","CreatedAt","ClearedOn","ClearedAmount"] }), "Pending");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(projRows,   { header: ["ID","Name","Location","Status","StartDate","Budget","Notes","Archived","ArchivedAt","ArchivedBy"] }), "Projects");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(nameRows,   { header: ["ID","ProjectID","Project","Name","Archived","ArchivedAt","ArchivedBy"] }), "Names");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ledgerRows, { header: ["ID","ProjectID","Project","NameID","Name","Date","Description","Amount","Type","Archived","ArchivedAt","ArchivedBy"] }), "Ledger");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pendRows,   { header: ["ID","ProjectID","Project","NameID","Name","Description","Amount","DueDate","Status","CreatedAt","ClearedOn","ClearedAmount","Archived","ArchivedAt","ArchivedBy"] }), "Pending");
 
     const projNm = isAll ? "ALL" : (projects.find(p => p.id === scope)?.name || "project").replace(/[^\w\s-]/g, "").replace(/\s+/g, "_");
     const filename = `buildtrack_${projNm}_${today()}.xlsx`;
@@ -1915,6 +2005,11 @@ function App() {
           return Array.from(map.values());
         };
 
+        const readArch = r => ({
+          archived: String(r.Archived || "").toLowerCase() === "yes" || r.Archived === true,
+          archivedAt: String(r.ArchivedAt || ""),
+          archivedBy: String(r.ArchivedBy || ""),
+        });
         const newProjects = mergeBy(projects, projRows, r => r.ID ? ({
           id: String(r.ID),
           name: String(r.Name || "Untitled"),
@@ -1923,12 +2018,14 @@ function App() {
           startDate: String(r.StartDate || ""),
           budget: r.Budget === "" || r.Budget == null ? null : Number(r.Budget),
           notes: String(r.Notes || ""),
+          ...readArch(r),
         }) : null);
-        const newNames    = mergeBy(names,    nameRows, r => r.ID ? ({ id: String(r.ID), pid: String(r.ProjectID), label: String(r.Name || "") }) : null);
+        const newNames    = mergeBy(names,    nameRows, r => r.ID ? ({ id: String(r.ID), pid: String(r.ProjectID), label: String(r.Name || ""), ...readArch(r) }) : null);
         const newEntries  = mergeBy(entries,  ledRows,  r => r.ID ? ({
           id: String(r.ID), pid: String(r.ProjectID), nameId: String(r.NameID),
           date: String(r.Date || today()), desc: String(r.Description || ""),
           amt: Number(r.Amount) || 0, type: (String(r.Type).toLowerCase() === "credit") ? "credit" : "debit",
+          ...readArch(r),
         }) : null);
         const newPending  = mergeBy(pending,  pendRows, r => r.ID ? ({
           id: String(r.ID), pid: String(r.ProjectID), nameId: String(r.NameID),
@@ -1936,6 +2033,7 @@ function App() {
           dueDate: String(r.DueDate || ""), status: (String(r.Status).toLowerCase() === "cleared") ? "cleared" : "pending",
           createdAt: String(r.CreatedAt || today()),
           clearedOn: String(r.ClearedOn || ""), clearedAmt: Number(r.ClearedAmount) || 0,
+          ...readArch(r),
         }) : null);
 
         // Stamp imported records with updatedAt if they don't have one (older exports)
@@ -1959,8 +2057,8 @@ function App() {
   const sendEmail = () => {
     const proj = projects.find(p => p.id === activePid);
     if (!proj) return;
-    const projEntries = entries.filter(e => e.pid === activePid);
-    const projPending = pending.filter(p => p.pid === activePid && p.status === "pending");
+    const projEntries = entries.filter(e => e.pid === activePid && !e.archived);
+    const projPending = pending.filter(p => p.pid === activePid && p.status === "pending" && !p.archived);
     const totalDebit = projEntries.filter(e => e.type === "debit").reduce((s, e) => s + Number(e.amt || 0), 0);
     const totalCredit = projEntries.filter(e => e.type === "credit").reduce((s, e) => s + Number(e.amt || 0), 0);
     const totalPending = projPending.reduce((s, p) => s + Number(p.amt || 0), 0);
@@ -1972,6 +2070,15 @@ function App() {
       byName[l] = (byName[l] || 0) + Number(e.amt || 0);
     });
     const sortedByName = Object.entries(byName).sort((a, b) => b[1] - a[1]);
+
+    // Step 1: download the .xlsx for the active project. exportExcel returns the filename it wrote.
+    let filename = "";
+    try {
+      filename = exportExcel(activePid);
+    } catch (e) {
+      console.error("Excel download failed before email:", e);
+      showToast("Couldn't generate Excel — sending email without attachment", "error");
+    }
 
     const body = [
       `BuildTrack Report — ${proj.name}`,
@@ -1991,41 +2098,35 @@ function App() {
       ...projPending.map(p => `  ${nameLabel(p.nameId)} — ${p.desc || "—"} — Rs ${Math.round(p.amt).toLocaleString("en-IN")}${p.dueDate ? ` (Due: ${fmtDate(p.dueDate)})` : ""}`),
       "",
       "========================================",
+      ...(filename ? [
+        "📎 ATTACH THIS FILE (just downloaded):",
+        `   ${filename}`,
+        "",
+        "The attached spreadsheet has the full ledger, names, and pending list",
+        "across four sheets. Open in Excel / Google Sheets / Numbers.",
+        "",
+      ] : []),
       "(Exported from BuildTrack Field Ledger)",
     ].join("\n");
 
     const subject = `BuildTrack Report — ${proj.name} — ${fmtDate(today())}`;
-    window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
-  };
-
-  const doDelete = (scope) => {
-    if (scope === "all") {
-      const fresh = _stamp({ id: uid(), name: "New Project" });
-      setProjects([fresh]);
-      setNames([]); setEntries([]); setPending([]);
-      setActivePid(fresh.id);
-    } else {
-      const remaining = projects.filter(p => p.id !== activePid);
-      setNames(list => list.filter(n => n.pid !== activePid));
-      setEntries(list => list.filter(e => e.pid !== activePid));
-      setPending(list => list.filter(p => p.pid !== activePid));
-      if (remaining.length === 0) {
-        const fresh = _stamp({ id: uid(), name: "New Project" });
-        setProjects([fresh]);
-        setActivePid(fresh.id);
-      } else {
-        setProjects(remaining);
-        setActivePid(remaining[0].id);
-      }
+    // Step 2: open mailto a tick later so the download notification doesn't get hidden by the mail window
+    setTimeout(() => {
+      window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
+    }, 300);
+    if (filename) {
+      showToast(`Excel downloaded — attach ${filename} to the email`, "success");
     }
-    setShowClear(false);
-    setTab("ledger");
-    schedulePush();
-    showToast("Backup saved — data cleared ✓", "success");
   };
 
   const activeProject = projects.find(p => p.id === activePid);
-  const pendingCount = pending.filter(p => p.pid === activePid && p.status === "pending").length;
+  const pendingCount = pending.filter(p => p.pid === activePid && p.status === "pending" && !p.archived).length;
+  const archiveCount =
+    projects.filter(p => p.archived).length +
+    names.filter(n => n.archived).length +
+    entries.filter(e => e.archived).length +
+    pending.filter(p => p.archived).length;
+  const liveProjects = live(projects);
 
   /* ---- Render ---- */
   return (
@@ -2052,10 +2153,6 @@ function App() {
             <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={onFile} style={{ display: "none" }}/>
             <Btn kind="ghost" onClick={sendEmail} title="Send Email">
               <span>✉</span><span className="bt-label-long">&nbsp;Send Email</span>
-            </Btn>
-            <div style={{ width: 1, background: C.rule, margin: "0 2px" }}/>
-            <Btn kind="danger" onClick={() => setShowClear(true)} title="Clear data">
-              <span>🗑</span><span className="bt-label-long">&nbsp;Clear</span>
             </Btn>
           </div>
         </div>
@@ -2098,7 +2195,7 @@ function App() {
           </div>
         )}
         <ProjectChips
-          projects={projects} activePid={activePid}
+          projects={liveProjects} activePid={activePid}
           onSelect={(id) => { setActivePid(id); setTab("ledger"); }}
           onNew={addProject}
         />
@@ -2126,7 +2223,7 @@ function App() {
           </div>
         )}
         <div style={{ marginTop: 12 }}>
-          <TabBar tab={tab} setTab={setTab} pendingCount={pendingCount} />
+          <TabBar tab={tab} setTab={setTab} pendingCount={pendingCount} archiveCount={archiveCount} />
         </div>
       </header>
 
@@ -2134,25 +2231,15 @@ function App() {
         {tab === "ledger"  && <LedgerView  pid={activePid} names={names} entries={entries} addEntry={addEntry} addName={addName}/>}
         {tab === "pending" && <PendingView pid={activePid} names={names} pending={pending} addPending={addPending} clearPending={clearPending} addName={addName}/>}
         {tab === "summary" && <SummaryView pid={activePid} names={names} entries={entries} pending={pending}/>}
-        {tab === "names"   && <NamesView   pid={activePid} names={names} entries={entries} pending={pending} addName={addName} deleteName={deleteName} toast={showToast}/>}
+        {tab === "names"   && <NamesView   pid={activePid} names={names} entries={entries} pending={pending} addName={addName} archiveName={(id) => archiveRecord("names", id)} toast={showToast}/>}
+        {tab === "archive" && <ArchiveView projects={projects} names={names} entries={entries} pending={pending} onRestore={restoreRecord}/>}
       </main>
-
-      {showClear && (
-        <ClearModal
-          state={{ projects, names, entries, pending }}
-          activePid={activePid}
-          onClose={() => setShowClear(false)}
-          onDelete={doDelete}
-          downloadExcel={exportExcel}
-          toast={showToast}
-        />
-      )}
 
       {editingProject && (
         <EditProjectModal
           project={editingProject}
           onSave={saveProject}
-          onDelete={deleteProjectFromEdit}
+          onArchive={archiveProjectFromEdit}
           onClose={() => setEditingProject(null)}
         />
       )}
