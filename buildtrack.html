@@ -136,63 +136,15 @@ const avatarColor = name => AVATAR_COLORS[(name || "?").charCodeAt(0) % AVATAR_C
    Seed data
    ============================================================ */
 const SEED = {
+  // Empty-state defaults. A new install starts with one placeholder project so the
+  // UI has something to render; the user renames or replaces it. No demo entries,
+  // names, or pending records.
   projects: [
-    { id: "p1", name: "Lokesh Nagar",      location: "Bhopal, MP", status: "Active",  startDate: "2026-02-01", budget: 1500000, notes: "Main site, Block A" },
-    { id: "p2", name: "Bhaginath Ground",  location: "Bhopal, MP", status: "Active",  startDate: "2026-03-10", budget: 600000,  notes: "" },
+    { id: "p_default", name: "My First Project", location: "", status: "Active", startDate: "", budget: null, notes: "" },
   ],
-  names: [
-    // p1
-    { id: "n_p1_sariya",  pid: "p1", label: "Sariya"  },
-    { id: "n_p1_bajru",   pid: "p1", label: "Bajru"   },
-    { id: "n_p1_cement",  pid: "p1", label: "Cement"  },
-    { id: "n_p1_muram",   pid: "p1", label: "Muram"   },
-    { id: "n_p1_labour",  pid: "p1", label: "Labour"  },
-    { id: "n_p1_tractor", pid: "p1", label: "Tractor" },
-    { id: "n_p1_deepu",   pid: "p1", label: "Deepu"   },
-    { id: "n_p1_klepu",   pid: "p1", label: "Klepu"   },
-    { id: "n_p1_bajirath",pid: "p1", label: "Bajirath"},
-    { id: "n_p1_sumna",   pid: "p1", label: "Sumna"   },
-    { id: "n_p1_pradeep", pid: "p1", label: "Pradeep Chaurasiya" },
-    { id: "n_p1_gabbu",   pid: "p1", label: "Gabbu"   },
-    { id: "n_p1_phone",   pid: "p1", label: "Phone & Chep" },
-    // p2
-    { id: "n_p2_labour",  pid: "p2", label: "Labour"  },
-    { id: "n_p2_cement",  pid: "p2", label: "Cement"  },
-    { id: "n_p2_client",  pid: "p2", label: "Client"  },
-  ],
-  entries: [
-    // Lokesh Nagar — from handwritten notebook
-    { id: "e_001", pid: "p1", nameId: "n_p1_phone",    date: "2026-03-01", desc: "Namolinine – paid",         amt: 20000,  type: "debit" },
-    { id: "e_002", pid: "p1", nameId: "n_p1_sariya",   date: "2026-03-02", desc: "Kaundhem – Lunkashlkyu",    amt: 191710, type: "debit" },
-    { id: "e_003", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-02", desc: "200ft Tractor (Deepan)",    amt: 6000,   type: "debit" },
-    { id: "e_004", pid: "p1", nameId: "n_p1_tractor",  date: "2026-03-02", desc: "40mm Tactor",               amt: 2000,   type: "debit" },
-    { id: "e_005", pid: "p1", nameId: "n_p1_bajirath", date: "2026-03-03", desc: "A/c – 40000 Phone",         amt: 18450,  type: "debit" },
-    { id: "e_006", pid: "p1", nameId: "n_p1_deepu",    date: "2026-03-10", desc: "20mm Giti – Rind",          amt: 4200,   type: "debit" },
-    { id: "e_007", pid: "p1", nameId: "n_p1_klepu",    date: "2026-03-10", desc: "20mm 2 Chau – paid",        amt: 10000,  type: "debit" },
-    { id: "e_008", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-11", desc: "Payment",                   amt: 7000,   type: "debit" },
-    { id: "e_009", pid: "p1", nameId: "n_p1_labour",   date: "2026-03-11", desc: "Security guard",            amt: 4500,   type: "debit" },
-    { id: "e_010", pid: "p1", nameId: "n_p1_sariya",   date: "2026-03-18", desc: "Payment",                   amt: 110580, type: "debit" },
-    { id: "e_011", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-18", desc: "Payment",                   amt: 6000,   type: "debit" },
-    { id: "e_012", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-21", desc: "→ Deepu (Bhaginath Gnd)",   amt: 10000,  type: "debit" },
-    { id: "e_013", pid: "p1", nameId: "n_p1_cement",   date: "2026-03-22", desc: "70 Bag – payment",          amt: 22250,  type: "debit" },
-    { id: "e_014", pid: "p1", nameId: "n_p1_sumna",    date: "2026-03-28", desc: "Site 4 – 2000",             amt: 10000,  type: "debit" },
-    { id: "e_015", pid: "p1", nameId: "n_p1_sumna",    date: "2026-03-28", desc: "Site – 4000",               amt: 20000,  type: "debit" },
-    { id: "e_016", pid: "p1", nameId: "n_p1_bajru",    date: "2026-03-31", desc: "Payment",                   amt: 6000,   type: "debit" },
-    { id: "e_017", pid: "p1", nameId: "n_p1_pradeep",  date: "2026-04-01", desc: "80 Bag Cement",             amt: 24800,  type: "debit" },
-    { id: "e_018", pid: "p1", nameId: "n_p1_gabbu",    date: "2026-04-01", desc: "Muram no Diye",             amt: 60000,  type: "debit" },
-    { id: "e_019", pid: "p1", nameId: "n_p1_labour",   date: "2026-04-01", desc: "Muran Felai",               amt: 1500,   type: "debit" },
-    // Bhaginath Ground
-    { id: "e_020", pid: "p2", nameId: "n_p2_labour",   date: "2026-03-15", desc: "Foundation work",           amt: 12000,  type: "debit"  },
-    { id: "e_021", pid: "p2", nameId: "n_p2_cement",   date: "2026-03-20", desc: "50 Bag",                    amt: 15500,  type: "debit"  },
-    { id: "e_022", pid: "p2", nameId: "n_p2_client",   date: "2026-03-25", desc: "Advance received",          amt: 50000,  type: "credit" },
-  ],
-  pending: [
-    { id: "pn_001", pid: "p1", nameId: "n_p1_sariya", desc: "Remaining Sariya balance", amt: 45000, dueDate: "2026-04-15", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
-    { id: "pn_002", pid: "p1", nameId: "n_p1_bajru",  desc: "Bajru April dues",         amt: 12000, dueDate: "2026-04-10", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
-    { id: "pn_003", pid: "p1", nameId: "n_p1_cement", desc: "50 Bag cement pending",    amt: 15500, dueDate: "2026-05-20", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
-    { id: "pn_004", pid: "p1", nameId: "n_p1_labour", desc: "Labour balance April",     amt:  8500, dueDate: "2026-04-05", status: "cleared", createdAt: "2026-04-01", clearedOn: "2026-04-05", clearedAmt: 8500 },
-    { id: "pn_005", pid: "p2", nameId: "n_p2_labour", desc: "May labour dues",          amt:  9000, dueDate: "2026-05-10", status: "pending", createdAt: "2026-04-01", clearedOn: "", clearedAmt: 0 },
-  ],
+  names: [],
+  entries: [],
+  pending: [],
 };
 
 /* ============================================================
