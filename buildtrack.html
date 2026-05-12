@@ -729,9 +729,37 @@ function LedgerView({ pid, names, entries, addEntry, addName }) {
     setAmt("");
   };
 
-  // Sort ascending by date for display
-  const sorted = [...projectEntries].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  // Column sort state. Default: date ascending (matches a paper ledger).
+  // Toggle direction by clicking the same column header again.
+  const [sortKey, setSortKey] = useState("date");
+  const [sortDir, setSortDir] = useState("asc");
   const nameLabel = id => projectNames.find(n => n.id === id)?.label || "—";
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("asc"); }
+  };
+  const sorted = useMemo(() => {
+    const arr = [...projectEntries];
+    const cmp = (a, b) => {
+      let va, vb;
+      if (sortKey === "date")    { va = a.date || "";              vb = b.date || ""; }
+      else if (sortKey === "name") { va = nameLabel(a.nameId).toLowerCase(); vb = nameLabel(b.nameId).toLowerCase(); }
+      else if (sortKey === "desc") { va = (a.desc || "").toLowerCase();      vb = (b.desc || "").toLowerCase(); }
+      else if (sortKey === "amount") {
+        // Signed amount: debit negative, credit positive — so amounts sort by direction of money flow
+        va = (a.type === "debit" ? -1 : 1) * (Number(a.amt) || 0);
+        vb = (b.type === "debit" ? -1 : 1) * (Number(b.amt) || 0);
+      }
+      if (va < vb) return -1;
+      if (va > vb) return 1;
+      return 0;
+    };
+    arr.sort(cmp);
+    if (sortDir === "desc") arr.reverse();
+    return arr;
+  }, [projectEntries, sortKey, sortDir, projectNames]);
+  // Visual group-break only makes sense when grouped by name; otherwise too noisy
+  const showNameGroups = sortKey === "name";
 
   return (
     <div>
@@ -766,11 +794,19 @@ function LedgerView({ pid, names, entries, addEntry, addName }) {
         <Btn kind="primary" onClick={submit}>+ Add</Btn>
       </div>
 
-      {/* Stat cards */}
+      {/* Stat cards.
+           Net direction: if you paid more than you received, label is "Net outflow" (red);
+           if you received more than you paid, label is "Net inflow" (green). The card never
+           shows a negative number — the direction is in the label. */}
       <div className="bt-stat-row" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
         <StatCard label="Total paid out" value={fmtINR(totalDebit)}  color={C.red}   bg={C.redBg} />
         <StatCard label="Total received" value={fmtINR(totalCredit)} color={C.green} bg={C.greenBg} />
-        <StatCard label="Net outflow"    value={fmtINR(net)}         color={net >= 0 ? C.red : C.green} />
+        <StatCard
+          label={net >= 0 ? "Net outflow" : "Net inflow"}
+          value={fmtINR(Math.abs(net))}
+          color={net >= 0 ? C.red : C.green}
+          bg={net >= 0 ? undefined : C.greenBg}
+        />
       </div>
 
       {/* Table */}
@@ -784,17 +820,17 @@ function LedgerView({ pid, names, entries, addEntry, addName }) {
           <table className="bt-table" style={{ width: "100%", minWidth: 720, fontSize: 14 }}>
             <thead>
               <tr style={{ background: "#FAF8F2", borderBottom: `1px solid ${C.rule}` }}>
-                <th style={th()}>Date</th>
-                <th style={th()}>Name</th>
-                <th style={th()}>Details</th>
-                <th style={{ ...th(), textAlign: "right" }}>Amount</th>
+                <SortableTh label="Date"    k="date"   sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                <SortableTh label="Name"    k="name"   sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                <SortableTh label="Details" k="desc"   sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                <SortableTh label="Amount"  k="amount" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
                 <th style={{ ...th(), width: 50 }}></th>
               </tr>
             </thead>
             <tbody>
               {sorted.map((e, i) => {
                 const prevName = i > 0 ? sorted[i - 1].nameId : null;
-                const gap = prevName && prevName !== e.nameId;
+                const gap = showNameGroups && prevName && prevName !== e.nameId;
                 const isOpen = openRow === e.id;
                 const rowBg = isOpen ? C.amberBg : (i % 2 ? C.bg : C.surface);
                 const rowBorderLeft = isOpen ? `3px solid ${C.amber}` : "3px solid transparent";
@@ -844,7 +880,12 @@ function LedgerView({ pid, names, entries, addEntry, addName }) {
             <tfoot>
               <tr style={{ background: "#FAF8F2", borderTop: `2px solid ${C.ruleDark}` }}>
                 <td colSpan={3} style={{ ...td(), color: C.inkMid, fontSize: 12 }}>{sorted.length} {sorted.length === 1 ? "entry" : "entries"}</td>
-                <td style={{ ...td(), textAlign: "right", color: C.red, fontWeight: 600 }}>{fmtINR(totalDebit)} paid</td>
+                <td style={{
+                  ...td(), textAlign: "right",
+                  color: net >= 0 ? C.red : C.green, fontWeight: 600,
+                }}>
+                  {fmtINR(Math.abs(net))} {net >= 0 ? "net outflow" : "net inflow"}
+                </td>
                 <td/>
               </tr>
             </tfoot>
@@ -905,6 +946,25 @@ function InlineRowAdd({ pid, forNameId, forNameLabel, onSave, onCancel }) {
 
 const th = () => ({ padding: "10px 12px", textAlign: "left", fontSize: 11, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 1, fontWeight: 500 });
 const td = () => ({ padding: "10px 12px" });
+
+// Clickable column header with an arrow indicator when this is the active sort column.
+function SortableTh({ label, k, sortKey, sortDir, onClick, align = "left" }) {
+  const active = sortKey === k;
+  const arrow = active ? (sortDir === "asc" ? " ↑" : " ↓") : "";
+  return (
+    <th
+      onClick={() => onClick(k)}
+      style={{
+        ...th(),
+        textAlign: align,
+        cursor: "pointer",
+        color: active ? C.amber : C.inkFaint,
+        userSelect: "none",
+      }}
+      title={`Sort by ${label.toLowerCase()}`}
+    >{label}{arrow}</th>
+  );
+}
 
 /* ============================================================
    PendingView
@@ -1383,6 +1443,13 @@ function ArchiveView({ projects, names, entries, pending, onRestore }) {
    ============================================================ */
 function SyncPill({ status, syncedAt, user, onSignIn, onSignOut, onForcePull, onForcePush }) {
   const [open, setOpen] = useState(false);
+  // Force a re-render every 5s so "Synced 12s ago" stays accurate without a state change upstream.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (status !== "synced" || !syncedAt) return;
+    const iv = setInterval(() => setTick(t => t + 1), 5000);
+    return () => clearInterval(iv);
+  }, [status, syncedAt]);
   const colors = {
     "synced":     { dot: C.green,  label: "Synced",   bg: C.greenBg,   border: C.greenLight },
     "pending":    { dot: C.amber,  label: "Saving…",  bg: C.amberBg,   border: C.amberBorder },
@@ -1935,7 +2002,7 @@ function App() {
   }, [syncStatus]);
 
   /* ---- Excel export ---- */
-  const exportExcel = (scope = activePid) => {
+  const exportExcel = (scope = activePid, { returnFile = false } = {}) => {
     const wb = XLSX.utils.book_new();
     const isAll = scope === "ALL";
     const projList = isAll ? projects : projects.filter(p => p.id === scope);
@@ -1974,6 +2041,11 @@ function App() {
 
     const projNm = isAll ? "ALL" : (projects.find(p => p.id === scope)?.name || "project").replace(/[^\w\s-]/g, "").replace(/\s+/g, "_");
     const filename = `buildtrack_${projNm}_${today()}.xlsx`;
+    if (returnFile) {
+      // Return a File object instead of triggering download — used by Web Share API
+      const data = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+      return new File([data], filename, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    }
     XLSX.writeFile(wb, filename);
     return filename;
   };
@@ -2053,8 +2125,13 @@ function App() {
     });
   };
 
-  /* ---- Email export ---- */
-  const sendEmail = () => {
+  /* ---- Email export ----
+     Two paths:
+       A. Web Share API (iPhone Safari, modern Android Chrome): native share sheet
+          with the .xlsx already attached. ONE tap to send via Mail / WhatsApp / etc.
+       B. Fallback (Mac Chrome, Mac Safari, older browsers): download the .xlsx and
+          open a mailto: with body text instructing the user to drag-attach it. */
+  const sendEmail = async () => {
     const proj = projects.find(p => p.id === activePid);
     if (!proj) return;
     const projEntries = entries.filter(e => e.pid === activePid && !e.archived);
@@ -2071,16 +2148,8 @@ function App() {
     });
     const sortedByName = Object.entries(byName).sort((a, b) => b[1] - a[1]);
 
-    // Step 1: download the .xlsx for the active project. exportExcel returns the filename it wrote.
-    let filename = "";
-    try {
-      filename = exportExcel(activePid);
-    } catch (e) {
-      console.error("Excel download failed before email:", e);
-      showToast("Couldn't generate Excel — sending email without attachment", "error");
-    }
-
-    const body = [
+    const subject = `BuildTrack Report — ${proj.name} — ${fmtDate(today())}`;
+    const bodyForShare = [
       `BuildTrack Report — ${proj.name}`,
       `Generated: ${fmtDate(today())}`,
       "========================================",
@@ -2098,21 +2167,60 @@ function App() {
       ...projPending.map(p => `  ${nameLabel(p.nameId)} — ${p.desc || "—"} — Rs ${Math.round(p.amt).toLocaleString("en-IN")}${p.dueDate ? ` (Due: ${fmtDate(p.dueDate)})` : ""}`),
       "",
       "========================================",
-      ...(filename ? [
-        "📎 ATTACH THIS FILE (just downloaded):",
-        `   ${filename}`,
-        "",
-        "The attached spreadsheet has the full ledger, names, and pending list",
-        "across four sheets. Open in Excel / Google Sheets / Numbers.",
-        "",
-      ] : []),
       "(Exported from BuildTrack Field Ledger)",
     ].join("\n");
 
-    const subject = `BuildTrack Report — ${proj.name} — ${fmtDate(today())}`;
-    // Step 2: open mailto a tick later so the download notification doesn't get hidden by the mail window
+    // Path A — Web Share API with file attachment (iPhone Safari, modern Android Chrome).
+    // navigator.canShare confirms the device accepts the file payload before we try.
+    let file = null;
+    try {
+      file = exportExcel(activePid, { returnFile: true });
+    } catch (e) {
+      console.error("Excel build failed before email:", e);
+    }
+
+    if (file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ title: subject, text: bodyForShare, files: [file] });
+        showToast("Shared with attachment ✓", "success");
+        return;
+      } catch (e) {
+        if (e && e.name !== "AbortError") {
+          console.warn("Web Share failed, falling back:", e);
+          // continue to fallback path
+        } else {
+          return; // user cancelled
+        }
+      }
+    }
+
+    // Path B — fallback: download .xlsx + open mailto with attach hint.
+    let filename = "";
+    try {
+      filename = exportExcel(activePid);
+    } catch (e) {
+      console.error("Excel download failed:", e);
+      showToast("Couldn't generate Excel — sending email without attachment", "error");
+    }
+
+    const bodyForMailto = filename
+      ? bodyForShare.replace(
+          "========================================\n(Exported from BuildTrack",
+          [
+            "========================================",
+            "📎 ATTACH THIS FILE (just downloaded):",
+            `   ${filename}`,
+            "",
+            "The attached spreadsheet has the full ledger, names, and pending list",
+            "across four sheets. Open in Excel / Google Sheets / Numbers.",
+            "",
+            "(Exported from BuildTrack",
+          ].join("\n")
+        )
+      : bodyForShare;
+
     setTimeout(() => {
-      window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
+      window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyForMailto)}`);
     }, 300);
     if (filename) {
       showToast(`Excel downloaded — attach ${filename} to the email`, "success");
